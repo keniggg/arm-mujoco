@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+target/
+dist/
+build/
+*.jar
+*.war
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Large generated files
+*.min.js
+*.min.css
+*.map
+
+# Docker volumes
+data/
