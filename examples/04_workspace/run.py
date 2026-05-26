@@ -67,9 +67,9 @@ CAMERA_EVERY_N = 2     # 25 Hz
 SPEED_NORMAL = 1.4
 SPEED_SLOW = 0.55  # very slow for precise grasp positioning
 SPEED_SCAN = 1.0
-SPEED_LIFT = 0.35
-SPEED_CARRY = 0.35
-SPEED_PLACE = 0.45
+SPEED_LIFT = 0.22
+SPEED_CARRY = 0.12
+SPEED_PLACE = 0.32
 
 WORKSPACE_MAX_SPHERES = 250
 SCAN_POS_TOL = 0.040
@@ -92,29 +92,53 @@ RED_UPPER_2 = (180, 255, 255)
 MIN_BALL_AREA_PX = 12       # minimum contour area (small cube at distance 鈮?15-30 px)
 CUBE_HALF_SIZE = 0.020  # 40 mm cube side 鈥?good grip depth in 50 mm gripper
 PAD_HALF_HEIGHT = 0.003
-CUBE_REST_Z = CUBE_HALF_SIZE + PAD_HALF_HEIGHT + 0.002
+CUBE_REST_Z = CUBE_HALF_SIZE + PAD_HALF_HEIGHT
 CAMERA_TO_GRIPPER_CENTER = 0.046
 SCAN_CAMERA_DISTANCE = 0.24
-GRIP_CONTACT_FORCE = 5.5
-GRIP_LOCK_MIN_FORCE = 0.4
-GRIP_MAX_FORCE = 60.0
-GRIP_SQUEEZE_MARGIN = 0.0040
-GRIP_CLOSE_FRAMES = 180
-GRIP_CONTACT_HOLD_FRAMES = 12
+GRIP_CONTACT_FORCE = 9.0
+GRIP_CONFIRM_FORCE = 5.8
+GRIP_LOCK_MIN_FORCE = 1.5
+GRIP_MAX_FORCE = 22.0
+GRIP_HOLD_PRELOAD = 0.0090
+GRIP_HOLD_CORRECTION = 0.00008
+GRIP_FORCE_DEADBAND = 1.1
+GRIP_CLOSE_FRAMES = 300
+GRIP_CONTACT_HOLD_FRAMES = 10
 GRIP_CLOSE_TIMEOUT_FRAMES = GRIP_CLOSE_FRAMES + 100
-GRIP_HOLD_FRAMES = 160
+GRIP_HOLD_FRAMES = 260
+GRIP_TRANSPORT_HOLD_FRAMES = 6000
+GRASP_LIFT_HEIGHT = 0.20
+PLACE_ABOVE_HEIGHT = 0.24
+GRASP_TARGET_FACE_BIAS = -0.008
+GRASP_TARGET_APPROACH_BIAS = 0.008
 CARRY_MIN_LIFT = 0.018
 CARRY_MAX_ERR = 0.035
 GRIP_LOCK_MAX_ERR = 0.024
 GRIP_LOCK_MAX_OPEN_AXIS_ERR = CUBE_HALF_SIZE * 0.65
-GRIP_LOCK_MAX_FACE_AXIS_ERR = CUBE_HALF_SIZE * 0.85
-PRE_CLOSE_MAX_XY_ERR = 0.012
-PRE_CLOSE_MAX_Z_ERR = 0.026
-PRE_CLOSE_MAX_OPEN_AXIS_ERR = CUBE_HALF_SIZE * 0.55
-PRE_CLOSE_MAX_CENTER_ERR = 0.030
-EARLY_CONTACT_MAX_PENETRATION = 0.0015
+GRIP_LOCK_MAX_FACE_AXIS_ERR = CUBE_HALF_SIZE * 0.75
+GRIP_LOCK_MAX_APPROACH_AXIS_ERR = CUBE_HALF_SIZE * 0.90
+CONTACT_CONFIRM_MAX_DIST = 0.0008
+MIN_STABLE_FINGER_CONTACTS = 2
+TARGET_FINGER_CONTACTS = 4
+MIN_CONTACT_DIVERSITY = 0.012
+MAX_CONTACT_PAIR_SKEW = 0.018
+MAX_CONTACT_CENTER_ERR = 0.026
+INITIAL_GRASP_Z_OFFSET = 0.000
+GRASP_Z_OFFSETS = [
+    INITIAL_GRASP_Z_OFFSET,
+    0.004,
+    0.008,
+    0.012,
+    0.016,
+]
+PRE_CLOSE_MAX_XY_ERR = 0.010
+PRE_CLOSE_MAX_Z_ERR = 0.018
+PRE_CLOSE_MAX_OPEN_AXIS_ERR = CUBE_HALF_SIZE * 0.45
+PRE_CLOSE_MAX_FACE_AXIS_ERR = CUBE_HALF_SIZE * 0.70
+PRE_CLOSE_MAX_CENTER_ERR = 0.022
+EARLY_CONTACT_MAX_PENETRATION = 0.0018
 MAX_LOCAL_REPLAN = 2
-PHYSICAL_EVAL_TOP_K = 3
+PHYSICAL_EVAL_TOP_K = 24
 REJECTED_GRASP_FRAME_PENALTY = 45.0
 VISION_REPLAN_DELTA = 0.018
 RGB_ANCHOR_ACCEPT_TOL = 0.055
@@ -191,8 +215,9 @@ def configure_finger_mesh_collision(xml_content: str) -> str:
     """Use Link7/Link8 as the real gripper contact bodies.
 
     The detailed STL meshes are kept visible.  Transparent inner box geoms are
-    attached to the same finger bodies to give MuJoCo stable pad-like contacts;
-    they do not kinematically attach or move the cube.
+    attached to the same finger bodies to give MuJoCo stable pad-like contacts.
+    Their outer faces are flush with the visible mesh inner faces, so they do
+    not create an invisible gripper protruding ahead of the rendered fingers.
     """
     left_marker = '<geom type="mesh" rgba="0.592157 0.666667 0.682353 1" mesh="Link7" />'
     right_marker = '<geom type="mesh" rgba="0.592157 0.666667 0.682353 1" mesh="Link8" />'
@@ -201,22 +226,22 @@ def configure_finger_mesh_collision(xml_content: str) -> str:
     left_collision = (
         '<geom name="left_finger_collision" type="mesh" '
         'rgba="0.592157 0.666667 0.682353 1" mesh="Link7" '
-        'condim="6" friction="8.0 3.0 1.0" '
-        'solimp="0.95 0.99 0.001" solref="0.006 1" />\n'
+        'condim="6" friction="10.0 4.0 1.4" '
+        'solimp="0.90 0.98 0.001" solref="0.012 1" />\n'
         '                    <geom name="left_finger_inner_pad_collision" type="box" '
-        'pos="0 -0.022 -0.002" size="0.018 0.022 0.003" '
-        'rgba="0 0 0 0" condim="6" friction="10.0 4.0 1.2" '
-        'solimp="0.97 0.995 0.0005" solref="0.004 1" />'
+        'pos="-0.005 -0.0005 0.002" size="0.016 0.018 0.002" '
+        'rgba="0 0 0 0" condim="6" friction="12.0 5.0 2.0" '
+        'solimp="0.92 0.985 0.0008" solref="0.012 1" />'
     )
     right_collision = (
         '<geom name="right_finger_collision" type="mesh" '
         'rgba="0.592157 0.666667 0.682353 1" mesh="Link8" '
-        'condim="6" friction="8.0 3.0 1.0" '
-        'solimp="0.95 0.99 0.001" solref="0.006 1" />\n'
+        'condim="6" friction="10.0 4.0 1.4" '
+        'solimp="0.90 0.98 0.001" solref="0.012 1" />\n'
         '                    <geom name="right_finger_inner_pad_collision" type="box" '
-        'pos="0 0.022 -0.002" size="0.018 0.022 0.003" '
-        'rgba="0 0 0 0" condim="6" friction="10.0 4.0 1.2" '
-        'solimp="0.97 0.995 0.0005" solref="0.004 1" />'
+        'pos="0.012 0.019 0.002" size="0.016 0.018 0.002" '
+        'rgba="0 0 0 0" condim="6" friction="12.0 5.0 2.0" '
+        'solimp="0.92 0.985 0.0008" solref="0.012 1" />'
     )
     if 'name="left_finger_collision"' not in xml_content:
         xml_content = xml_content.replace(left_marker, left_collision, 1)
@@ -250,6 +275,9 @@ class BallDetector:
         self._camera_id = camera_id
         self._ball_body_id = ball_body_id
         self._last_detection_uv: tuple[int, int] | None = None
+        self._last_detection_candidates_uv: list[tuple[float, float]] = []
+        self._last_detection_spread_px = 0.0
+        self._last_estimate_spread_m = 0.0
         self._last_estimated_xyz: np.ndarray | None = None
         self._last_axis_uv: np.ndarray | None = None
         self._last_axis_confidence = 0.0
@@ -272,8 +300,32 @@ class BallDetector:
         if area < MIN_BALL_AREA_PX:
             return None, 0
         (cx, cy), radius = cv2.minEnclosingCircle(largest)
-        self._last_detection_uv = (int(cx), int(cy))
         pts = largest.reshape(-1, 2).astype(np.float64)
+        candidates: list[np.ndarray] = [np.array([cx, cy], dtype=np.float64)]
+        moments = cv2.moments(largest)
+        if abs(float(moments.get("m00", 0.0))) > 1e-9:
+            candidates.append(np.array([
+                moments["m10"] / moments["m00"],
+                moments["m01"] / moments["m00"],
+            ], dtype=np.float64))
+        rect = cv2.minAreaRect(largest)
+        candidates.append(np.array(rect[0], dtype=np.float64))
+        x, y, w, h = cv2.boundingRect(largest)
+        candidates.append(np.array([x + 0.5 * w, y + 0.5 * h], dtype=np.float64))
+        if len(pts) > 0:
+            candidates.append(np.mean(pts, axis=0))
+
+        candidate_arr = np.vstack(candidates)
+        robust_uv = np.median(candidate_arr, axis=0)
+        spread = np.linalg.norm(candidate_arr - robust_uv, axis=1)
+        self._last_detection_spread_px = float(np.max(spread)) if len(spread) else 0.0
+        self._last_detection_candidates_uv = [
+            (float(p[0]), float(p[1])) for p in candidate_arr
+        ]
+        self._last_detection_uv = (
+            int(round(float(robust_uv[0]))),
+            int(round(float(robust_uv[1]))),
+        )
         if len(pts) >= 5:
             centered = pts - np.mean(pts, axis=0)
             cov = centered.T @ centered / max(len(pts) - 1, 1)
@@ -337,9 +389,55 @@ class BallDetector:
         est[2] = z_plane
         return est
 
+    def estimate_3d_from_detection(self, center_uv: tuple[int, int], data,
+                                   img_w: int, img_h: int,
+                                   target_z: float | None = None) -> np.ndarray | None:
+        """Robustly back-project the detected cube center from RGB.
+
+        The visible red area is not always a perfect square in the wrist image:
+        perspective, shadows and partial occlusion can bias a single enclosing
+        circle center by centimeters.  Back-project several contour center
+        estimates and use the median position on the table plane.
+        """
+        candidates = list(self._last_detection_candidates_uv)
+        if not candidates:
+            candidates = [(float(center_uv[0]), float(center_uv[1]))]
+
+        estimates: list[np.ndarray] = []
+        for uv in candidates:
+            est = self.estimate_3d(
+                (int(round(uv[0])), int(round(uv[1]))),
+                data, img_w, img_h, target_z=target_z,
+            )
+            if est is not None and np.all(np.isfinite(est)):
+                estimates.append(est)
+        if not estimates:
+            return None
+
+        arr = np.vstack(estimates)
+        xy_med = np.median(arr[:, :2], axis=0)
+        err = np.linalg.norm(arr[:, :2] - xy_med, axis=1)
+        keep = err <= max(0.030, float(np.median(err)) + 0.015)
+        if np.any(keep):
+            arr = arr[keep]
+            err = err[keep]
+        robust = np.median(arr, axis=0)
+        robust[2] = target_z if target_z is not None else CUBE_REST_Z
+        self._last_estimate_spread_m = float(np.max(err)) if len(err) else 0.0
+        self._last_estimated_xyz = robust
+        return robust
+
     @property
     def last_estimated_xyz(self) -> np.ndarray | None:
         return self._last_estimated_xyz
+
+    @property
+    def last_detection_spread_px(self) -> float:
+        return self._last_detection_spread_px
+
+    @property
+    def last_estimate_spread_m(self) -> float:
+        return self._last_estimate_spread_m
 
     def last_opening_hints_world(self, data) -> list[np.ndarray]:
         """Return RGB-derived horizontal gripper-opening hints, if reliable."""
@@ -459,7 +557,10 @@ class SmoothGripperController:
         self._done = True
         self._contact = False
         self._last_ctrl: dict[int, float] = {}
+        self._start_ctrl: dict[int, float] = {}
+        self._target_ctrl: dict[int, float] = {}
         self._hold_left = 0
+        self._force_ema = 0.0
 
     @property
     def done(self) -> bool:
@@ -470,20 +571,37 @@ class SmoothGripperController:
         return self._contact
 
     def open(self, duration_frames: int = 25) -> None:
-        self._mode = "open"
-        self._progress = 0.0
-        self._total_frames = max(duration_frames, 1)
-        self._done = False
-        self._contact = False
-        self._hold_left = 0
+        self._begin_motion("open", duration_frames)
 
     def close(self, duration_frames: int = 100) -> None:
-        self._mode = "close"
+        self._begin_motion("close", duration_frames)
+
+    def _begin_motion(self, mode: str, duration_frames: int) -> None:
+        self._mode = mode
         self._progress = 0.0
         self._total_frames = max(duration_frames, 1)
         self._done = False
         self._contact = False
+        self._last_ctrl = {}
+        self._start_ctrl = {}
+        self._target_ctrl = {}
         self._hold_left = 0
+        self._force_ema = 0.0
+        key = "open" if mode == "open" else "closed"
+        for item in self._limits:
+            act = self._j2a.get(item["joint"])
+            if act is None:
+                continue
+            lo = min(item["open"], item["closed"])
+            hi = max(item["open"], item["closed"])
+            start = float(self._data.ctrl[act])
+            if not np.isfinite(start):
+                start = float(self._data.qpos[self._model.jnt_qposadr[item["joint"]]])
+            start = float(np.clip(start, lo, hi))
+            target = float(item[key])
+            self._start_ctrl[act] = start
+            self._target_ctrl[act] = target
+            self._last_ctrl[act] = start
 
     def hold(self, duration_frames: int = GRIP_HOLD_FRAMES) -> None:
         self._mode = "hold"
@@ -492,10 +610,14 @@ class SmoothGripperController:
         self._done = False
         self._contact = True
         self._hold_left = max(duration_frames, 1)
+        self._start_ctrl = {}
+        self._target_ctrl = {}
+        self._force_ema = self._max_actuator_force()
         for item in self._limits:
             act = self._j2a.get(item["joint"])
             if act is not None:
-                self._last_ctrl[act] = float(self._data.ctrl[act])
+                self._last_ctrl[act] = self._toward_closed(
+                    item, float(self._data.ctrl[act]), GRIP_HOLD_PRELOAD)
 
     def step(self, force_threshold: float = GRIP_CONTACT_FORCE,
              max_force: float = GRIP_MAX_FORCE) -> None:
@@ -504,10 +626,15 @@ class SmoothGripperController:
             return
         measured_force = self._max_actuator_force()
         if self._mode == "hold":
-            if measured_force > max_force:
-                self._relax_hold(GRIP_SQUEEZE_MARGIN * 0.5)
-            elif measured_force < force_threshold * 0.65:
-                self._tighten_hold(GRIP_SQUEEZE_MARGIN * 0.25)
+            self._force_ema = 0.85 * self._force_ema + 0.15 * measured_force
+            low_force = max(GRIP_LOCK_MIN_FORCE, force_threshold - GRIP_FORCE_DEADBAND)
+            high_force = force_threshold + GRIP_FORCE_DEADBAND
+            if self._force_ema > max_force:
+                self._relax_hold(GRIP_HOLD_CORRECTION * 4.0)
+            elif self._force_ema > high_force:
+                self._relax_hold(GRIP_HOLD_CORRECTION)
+            elif self._force_ema < low_force and self._hold_left % 4 == 0:
+                self._tighten_hold(GRIP_HOLD_CORRECTION)
             self._write_final()
             self._hold_left -= 1
             if self._hold_left <= 0:
@@ -523,10 +650,10 @@ class SmoothGripperController:
             act = self._j2a.get(item["joint"])
             if act is None:
                 continue
-            if self._mode == "close":
-                val = item["open"] + (item["closed"] - item["open"]) * self._progress
-            else:
-                val = item["closed"] + (item["open"] - item["closed"]) * self._progress
+            start = self._start_ctrl.get(act, float(self._data.ctrl[act]))
+            target = self._target_ctrl.get(
+                act, item["closed"] if self._mode == "close" else item["open"])
+            val = float(start + (target - start) * self._progress)
             self._data.ctrl[act] = val
             self._last_ctrl[act] = val
         if reached_end:
@@ -788,26 +915,72 @@ def make_tool_xmat(z_axis: np.ndarray, opening_hint: np.ndarray) -> np.ndarray:
     return np.column_stack((x_axis, y_axis, z_axis))
 
 
+def contact_patch_span(points: list[np.ndarray], xmat: np.ndarray | None) -> float:
+    if len(points) < 2:
+        return 0.0
+    pts = np.vstack(points)
+    if xmat is None:
+        face_axis = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        approach_axis = np.array([0.0, 0.0, -1.0], dtype=np.float64)
+    else:
+        face_axis = _unit(xmat[:, 0], np.array([1.0, 0.0, 0.0], dtype=np.float64))
+        approach_axis = _unit(xmat[:, 2], np.array([0.0, 0.0, -1.0], dtype=np.float64))
+    face_span = float(np.ptp(pts @ face_axis))
+    approach_span = float(np.ptp(pts @ approach_axis))
+    return max(face_span, approach_span)
+
+
+def contact_patch_is_large(contact_count: int, patch_span: float) -> bool:
+    return (
+        contact_count >= TARGET_FINGER_CONTACTS or
+        (contact_count >= MIN_STABLE_FINGER_CONTACTS and
+         patch_span >= MIN_CONTACT_DIVERSITY)
+    )
+
+
+def contact_alignment_metrics(left_points: list[np.ndarray],
+                              right_points: list[np.ndarray],
+                              cube_xyz: np.ndarray,
+                              xmat: np.ndarray | None) -> tuple[float, float]:
+    if not left_points or not right_points:
+        return float("inf"), float("inf")
+    left_center = np.mean(np.vstack(left_points), axis=0)
+    right_center = np.mean(np.vstack(right_points), axis=0)
+    if xmat is None:
+        opening_axis = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+    else:
+        opening_axis = _unit(xmat[:, 1], np.array([0.0, 1.0, 0.0], dtype=np.float64))
+    pair_delta = left_center - right_center
+    pair_skew = float(np.linalg.norm(
+        pair_delta - np.dot(pair_delta, opening_axis) * opening_axis
+    ))
+    contact_center = 0.5 * (left_center + right_center)
+    center_err = float(np.linalg.norm(contact_center - cube_xyz))
+    return pair_skew, center_err
+
+
 def generate_grasp_orientations(
     ball_xyz: np.ndarray,
     opening_hints: list[np.ndarray] | None = None,
 ) -> list[np.ndarray]:
-    """Prefer top-down grasps, then gradually tilt toward edge targets."""
+    """Prefer top-down grasps with jaws parallel to cube faces."""
     radial = _radial_xy(ball_xyz[:2])
     tangent = _tangent_xy(radial)
     candidates: list[np.ndarray] = []
     seen: set[tuple[float, ...]] = set()
 
     base_hints: list[np.ndarray] = []
+    base_hints.extend([
+        np.array([0.0, 1.0, 0.0], dtype=np.float64),
+        np.array([0.0, -1.0, 0.0], dtype=np.float64),
+        np.array([1.0, 0.0, 0.0], dtype=np.float64),
+        np.array([-1.0, 0.0, 0.0], dtype=np.float64),
+        tangent, -tangent,
+    ])
     if opening_hints:
         base_hints.extend(opening_hints)
-    base_hints.extend([
-        tangent, -tangent,
-        np.array([0.0, 1.0, 0.0], dtype=np.float64),
-        np.array([1.0, 0.0, 0.0], dtype=np.float64),
-    ])
 
-    for tilt_deg in [0.0, 15.0, 30.0, 45.0, 58.0]:
+    for tilt_deg in [0.0, 5.0, 10.0, 15.0]:
         tilt = math.radians(tilt_deg)
         z_axis = _unit(
             math.sin(tilt) * radial + np.array([0.0, 0.0, -math.cos(tilt)]),
@@ -839,9 +1012,12 @@ def grasp_stability_score(xmat: np.ndarray, ball_xyz: np.ndarray) -> float:
     radial_opening = abs(float(np.dot(y_axis, radial)))
     tangent_opening_signed = float(np.dot(y_axis, tangent))
     tangent_opening = abs(tangent_opening_signed)
+    world_axis_alignment = max(abs(float(np.dot(y_axis, np.array([1.0, 0.0, 0.0])))),
+                               abs(float(np.dot(y_axis, np.array([0.0, 1.0, 0.0])))))
     return (
-        3.0 * horizontal_tilt +
-        1.0 * max(0.0, 0.98 - downward) +
+        14.0 * horizontal_tilt +
+        6.0 * max(0.0, 0.995 - downward) +
+        1.2 * max(0.0, 0.98 - world_axis_alignment) +
         0.15 * radial_opening +
         0.10 * max(0.0, -tangent_opening_signed) +
         0.08 * max(0.0, 0.75 - tangent_opening)
@@ -996,22 +1172,24 @@ def main() -> None:
     xml_content = xml_content.replace('kp="70"', 'kp="250"')
     xml_content = xml_content.replace('kp="45"', 'kp="180"')
     # Stronger real gripper forces.  The default MJCF limits are too weak for
-    # a 40 mm cube and let the fingers get pushed open during contact.
+    # a 40 mm cube, but excessive force/servo stiffness causes stick-slip
+    # chatter in the contact solver.  Use a moderately stronger, well-damped
+    # finger servo so real two-sided contact has enough normal force.
     xml_content = xml_content.replace(
         '<joint name="left_finger" pos="0 0 0" axis="0 0 1" type="slide" range="-0.025 0" actuatorfrcrange="-5 5" />',
-        '<joint name="left_finger" pos="0 0 0" axis="0 0 1" type="slide" range="-0.025 0" actuatorfrcrange="-60 60" />',
+        '<joint name="left_finger" pos="0 0 0" axis="0 0 1" type="slide" range="-0.025 0.007" actuatorfrcrange="-80 80" />',
     )
     xml_content = xml_content.replace(
         '<joint name="right_finger" pos="0 0 0" axis="0 0 -1" type="slide" range="0 0.025" actuatorfrcrange="-5 5" />',
-        '<joint name="right_finger" pos="0 0 0" axis="0 0 -1" type="slide" range="0 0.025" actuatorfrcrange="-60 60" />',
+        '<joint name="right_finger" pos="0 0 0" axis="0 0 -1" type="slide" range="-0.007 0.025" actuatorfrcrange="-80 80" />',
     )
     xml_content = xml_content.replace(
         '<position name="left_finger_act" joint="left_finger" kp="55" kv="7"\n              forcerange="-8 8"/>',
-        '<position name="left_finger_act" joint="left_finger" kp="220" kv="18"\n              forcerange="-60 60"/>',
+        '<position name="left_finger_act" joint="left_finger" kp="520" kv="120"\n              forcerange="-80 80"/>',
     )
     xml_content = xml_content.replace(
         '<position name="right_finger_act" joint="right_finger" kp="55" kv="7"\n              forcerange="-8 8"/>',
-        '<position name="right_finger_act" joint="right_finger" kp="220" kv="18"\n              forcerange="-60 60"/>',
+        '<position name="right_finger_act" joint="right_finger" kp="520" kv="120"\n              forcerange="-80 80"/>',
     )
 
     xml_dir = os.path.dirname(model_path)
@@ -1249,26 +1427,50 @@ def main() -> None:
                 ball_qpos_adr < 0 or phase == -1):
             return
         if phase in (0, 1, 2, 3) and cube_touching_robot():
-            # The anchor is only for idle solver jitter.  Robot contact is a
-            # real external force, so pinning the cube here creates apparent
-            # penetration and violates the physics we are trying to test.
-            release_cube_static_anchor("robot touched cube before gripper close")
-            return
+            # MuJoCo can report very light positive-margin contacts before
+            # visible touch.  Keep the cube fixed through those numerical
+            # near-contacts; only a real collision/penetration releases it.
+            bad_contact, bad_name = cube_nonfinger_robot_contact()
+            min_dist = cube_robot_min_contact_dist()
+            if bad_contact or min_dist < -EARLY_CONTACT_MAX_PENETRATION:
+                reason = "robot touched cube before gripper close"
+                if bad_contact:
+                    reason += f": {bad_name}"
+                release_cube_static_anchor(reason)
+                return
         if phase == 4:
-            # Keep the cube perfectly still until the fingers really touch it.
-            # Once contact exists, let the solver resolve the squeeze.
-            left_finger_hit, right_finger_hit, _ = pad_cube_contact_sides()
+            # Keep the cube perfectly still until a real two-sided grasp is
+            # confirmed. Releasing on the first one-sided touch lets a finger
+            # nudge the cube before the opposing finger has any support, which
+            # shows up as pre-grasp jitter and weak, off-center grasps.
+            left_finger_hit, right_finger_hit, pad_contacts = pad_cube_contact_sides()
+            patch_span = finger_contact_patch_span()
             bad_contact, bad_name = cube_nonfinger_robot_contact()
             if bad_contact:
-                release_cube_static_anchor(f"non-finger robot contact: {bad_name}")
+                data.qpos[ball_qpos_adr:ball_qpos_adr + 3] = cube_static_pos
+                data.qpos[ball_qpos_adr + 3:ball_qpos_adr + 7] = cube_static_quat
+                zero_cube_velocity()
+                mujoco.mj_forward(model, data)
                 return
-            if not (left_finger_hit or right_finger_hit):
+            min_dist = cube_robot_min_contact_dist()
+            force = gripper_ctrl._max_actuator_force()
+            pair_skew, contact_center_err = finger_contact_alignment()
+            confirmed_squeeze = (
+                left_finger_hit and right_finger_hit and
+                contact_patch_is_large(pad_contacts, patch_span) and
+                pair_skew <= MAX_CONTACT_PAIR_SKEW and
+                contact_center_err <= MAX_CONTACT_CENTER_ERR and
+                min_dist <= CONTACT_CONFIRM_MAX_DIST and
+                force >= GRIP_CONFIRM_FORCE and
+                grip_contact_hold >= GRIP_CONTACT_HOLD_FRAMES
+            )
+            if not confirmed_squeeze:
                 data.qpos[ball_qpos_adr:ball_qpos_adr + 3] = cube_static_pos
                 data.qpos[ball_qpos_adr + 3:ball_qpos_adr + 7] = cube_static_quat
                 zero_cube_velocity()
                 mujoco.mj_forward(model, data)
             else:
-                release_cube_static_anchor("first real finger contact")
+                release_cube_static_anchor("confirmed two-sided squeeze")
             return
         data.qpos[ball_qpos_adr:ball_qpos_adr + 3] = cube_static_pos
         data.qpos[ball_qpos_adr + 3:ball_qpos_adr + 7] = cube_static_quat
@@ -1355,6 +1557,38 @@ def main() -> None:
                 count += 1
         return left_hit, right_hit, count
 
+    def finger_contact_patch_span() -> float:
+        points: list[np.ndarray] = []
+        for ci in range(data.ncon):
+            con = data.contact[ci]
+            g1 = int(con.geom1)
+            g2 = int(con.geom2)
+            if cube_geom_id not in (g1, g2):
+                continue
+            other = g2 if g1 == cube_geom_id else g1
+            other_body = int(model.geom_bodyid[other])
+            if other_body in (int(left_id), int(right_id)):
+                points.append(np.array(con.pos, dtype=np.float64).copy())
+        return contact_patch_span(points, dynamic_grasp_xmat)
+
+    def finger_contact_alignment() -> tuple[float, float]:
+        left_points: list[np.ndarray] = []
+        right_points: list[np.ndarray] = []
+        for ci in range(data.ncon):
+            con = data.contact[ci]
+            g1 = int(con.geom1)
+            g2 = int(con.geom2)
+            if cube_geom_id not in (g1, g2):
+                continue
+            other = g2 if g1 == cube_geom_id else g1
+            other_body = int(model.geom_bodyid[other])
+            if other_body == int(left_id):
+                left_points.append(np.array(con.pos, dtype=np.float64).copy())
+            elif other_body == int(right_id):
+                right_points.append(np.array(con.pos, dtype=np.float64).copy())
+        return contact_alignment_metrics(
+            left_points, right_points, current_ball_xyz(), dynamic_grasp_xmat)
+
     def cube_nonfinger_robot_contact() -> tuple[bool, str]:
         finger_bodies = {int(left_id), int(right_id)}
         for ci in range(data.ncon):
@@ -1381,12 +1615,35 @@ def main() -> None:
     def gripper_contact_center() -> np.ndarray:
         return data.xpos[pinch_body_id].copy()
 
+    def gripper_is_open(tol: float = 0.0025) -> bool:
+        for item in gripper_limits:
+            q = float(data.qpos[model.jnt_qposadr[item["joint"]]])
+            if abs(q - float(item["open"])) > tol:
+                return False
+        return True
+
     def scratch_gripper_contact_center(scratch) -> np.ndarray:
         return scratch.xpos[pinch_body_id].copy()
 
+    def grasp_target_bias(xmat: np.ndarray | None) -> np.ndarray:
+        if xmat is None:
+            return np.zeros(3, dtype=np.float64)
+        face_axis = _unit(xmat[:, 0], np.array([1.0, 0.0, 0.0], dtype=np.float64))
+        approach_axis = _unit(xmat[:, 2], np.array([0.0, 0.0, -1.0], dtype=np.float64))
+        return (
+            GRASP_TARGET_FACE_BIAS * face_axis +
+            GRASP_TARGET_APPROACH_BIAS * approach_axis
+        )
+
+    def gripper_object_center() -> np.ndarray:
+        return gripper_contact_center() - grasp_target_bias(dynamic_grasp_xmat)
+
+    def scratch_gripper_object_center(scratch, xmat: np.ndarray) -> np.ndarray:
+        return scratch_gripper_contact_center(scratch) - grasp_target_bias(xmat)
+
     def gripper_body_target_for_contact(contact_target: np.ndarray,
                                         xmat: np.ndarray) -> np.ndarray:
-        return np.asarray(contact_target, dtype=np.float64)
+        return np.asarray(contact_target, dtype=np.float64) + grasp_target_bias(xmat)
 
     def normalized_quat(quat: np.ndarray) -> np.ndarray:
         quat = np.asarray(quat, dtype=np.float64).copy()
@@ -1411,22 +1668,40 @@ def main() -> None:
 
     def grip_geometry_metrics() -> dict[str, float | bool]:
         cube = current_ball_xyz()
-        left = data.xpos[left_id].copy()
-        right = data.xpos[right_id].copy()
-        span = right - left
-        center_gap = float(np.linalg.norm(span))
-        if center_gap < 1e-9:
-            opening_axis = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+        if dynamic_grasp_xmat is not None:
+            opening_axis = _unit(
+                dynamic_grasp_xmat[:, 1],
+                np.array([0.0, 1.0, 0.0], dtype=np.float64),
+            )
+            face_axis = _unit(
+                dynamic_grasp_xmat[:, 0],
+                np.array([1.0, 0.0, 0.0], dtype=np.float64),
+            )
+            approach_axis = _unit(
+                dynamic_grasp_xmat[:, 2],
+                np.array([0.0, 0.0, -1.0], dtype=np.float64),
+            )
+            center_gap = float(np.linalg.norm(data.xpos[right_id] - data.xpos[left_id]))
         else:
-            opening_axis = span / center_gap
-        delta = cube - gripper_contact_center()
+            left = data.xpos[left_id].copy()
+            right = data.xpos[right_id].copy()
+            span = right - left
+            center_gap = float(np.linalg.norm(span))
+            opening_axis = _unit(span, np.array([0.0, 1.0, 0.0], dtype=np.float64))
+            approach_axis = np.array([0.0, 0.0, -1.0], dtype=np.float64)
+            face_axis = _unit(
+                np.cross(opening_axis, approach_axis),
+                np.array([1.0, 0.0, 0.0], dtype=np.float64),
+            )
+        delta = cube - gripper_object_center()
         open_axis_err = abs(float(np.dot(delta, opening_axis)))
-        face_delta = delta - np.dot(delta, opening_axis) * opening_axis
-        face_axis_err = float(np.linalg.norm(face_delta))
+        face_axis_err = abs(float(np.dot(delta, face_axis)))
+        approach_axis_err = abs(float(np.dot(delta, approach_axis)))
         center_err = float(np.linalg.norm(delta))
         ok = (
             open_axis_err <= GRIP_LOCK_MAX_OPEN_AXIS_ERR and
             face_axis_err <= GRIP_LOCK_MAX_FACE_AXIS_ERR and
+            approach_axis_err <= GRIP_LOCK_MAX_APPROACH_AXIS_ERR and
             center_err <= GRIP_LOCK_MAX_ERR
         )
         return {
@@ -1434,6 +1709,7 @@ def main() -> None:
             "center_err": center_err,
             "open_axis_err": open_axis_err,
             "face_axis_err": face_axis_err,
+            "approach_axis_err": approach_axis_err,
             "surface_gap": float(center_gap),
         }
 
@@ -1441,26 +1717,42 @@ def main() -> None:
         if ball_qpos_adr < 0:
             return False
         cube = current_ball_xyz()
-        gc = gripper_contact_center()
+        gc = gripper_object_center()
         err = float(np.linalg.norm(cube - gc))
         contacts = finger_contact_count()
         left_pad_hit, right_pad_hit, pad_contacts = pad_cube_contact_sides()
+        patch_span = finger_contact_patch_span()
+        pair_skew, contact_center_err = finger_contact_alignment()
+        min_dist = cube_robot_min_contact_dist()
         force = gripper_ctrl._max_actuator_force()
         geom = grip_geometry_metrics()
         if (not left_pad_hit or not right_pad_hit or
-                force < GRIP_LOCK_MIN_FORCE or err > GRIP_LOCK_MAX_ERR or
+                not contact_patch_is_large(pad_contacts, patch_span) or
+                pair_skew > MAX_CONTACT_PAIR_SKEW or
+                contact_center_err > MAX_CONTACT_CENTER_ERR or
+                min_dist > CONTACT_CONFIRM_MAX_DIST or
+                force < GRIP_CONFIRM_FORCE or err > GRIP_LOCK_MAX_ERR or
                 not bool(geom["ok"])):
             print(f"    Physical grasp refused ({context}): contacts={contacts} "
                   f"finger_contacts={pad_contacts} left={left_pad_hit} right={right_pad_hit} "
+                  f"patch_span={patch_span*1000:.1f}mm "
+                  f"pair_skew={pair_skew*1000:.1f}mm "
+                  f"contact_center_err={contact_center_err*1000:.1f}mm "
+                  f"contact_dist={min_dist*1000:.2f}mm "
                   f"force={force:.2f}N err={err*100:.1f}cm "
                   f"geom_center={geom['center_err']*100:.1f}cm "
                   f"open_axis={geom['open_axis_err']*100:.1f}cm "
                   f"face_axis={geom['face_axis_err']*100:.1f}cm "
+                  f"approach_axis={geom['approach_axis_err']*100:.1f}cm "
                   f"surface_gap={geom['surface_gap']*100:.1f}cm")
             return False
         release_cube_static_anchor("physical grasp confirmed")
         print(f"    Physical grasp confirmed ({context}): contacts={contacts} "
-              f"finger_contacts={pad_contacts} force={force:.2f}N "
+              f"finger_contacts={pad_contacts} patch_span={patch_span*1000:.1f}mm "
+              f"pair_skew={pair_skew*1000:.1f}mm "
+              f"contact_center_err={contact_center_err*1000:.1f}mm "
+              f"contact_dist={min_dist*1000:.2f}mm "
+              f"force={force:.2f}N "
               f"geom_center={geom['center_err']*100:.1f}cm")
         return True
 
@@ -1478,7 +1770,9 @@ def main() -> None:
         return
 
     def stabilize_cube_at_rest() -> None:
-        if ball_qpos_adr < 0 or cube_touching_fingers():
+        if (ball_qpos_adr < 0 or
+                (cube_touching_fingers() and
+                 cube_robot_min_contact_dist() <= CONTACT_CONFIRM_MAX_DIST)):
             return
         # Before the fingers touch the cube, keep solver jitter from creeping
         # into the freejoint. Real user perturbations still move it because
@@ -1511,7 +1805,7 @@ def main() -> None:
                     cv2.waitKey(1)
                 print(f"    Vision {label}: cube not in RGB view")
                 return None
-            est_xyz = detector.estimate_3d(
+            est_xyz = detector.estimate_3d_from_detection(
                 center_uv, data, rgb_window.width, rgb_window.height,
                 target_z=CUBE_REST_Z,
             )
@@ -1525,7 +1819,6 @@ def main() -> None:
             if not in_workspace:
                 print(f"    Vision {label}: rejected estimate {np.round(est_xyz, 3)}")
                 return None
-            detector._last_estimated_xyz = est_xyz
             detected_opening_hints = detector.last_opening_hints_world(data)
             if draw and CV2_AVAILABLE:
                 annotated = draw_detection_overlay(rgb_img, True, est_xyz)
@@ -1535,8 +1828,12 @@ def main() -> None:
             hint_msg = ""
             if detected_opening_hints:
                 hint_msg = f" opening_hint={np.round(detected_opening_hints[0][:2], 3)}"
+            spread_msg = (
+                f" spread={detector.last_estimate_spread_m*100:.1f}cm/"
+                f"{detector.last_detection_spread_px:.1f}px"
+            )
             print(f"    Vision {label}: uv={center_uv} r={radius}px "
-                  f"xyz={np.round(est_xyz, 3)}{hint_msg}")
+                  f"xyz={np.round(est_xyz, 3)}{spread_msg}{hint_msg}")
             return est_xyz
         except Exception as exc:
             print(f"    Vision {label}: ERROR {exc}")
@@ -1544,7 +1841,7 @@ def main() -> None:
             return None
 
     def plan_is_ready(plan: dict[str, IKResult]) -> bool:
-        required = {"approach", "grasp", "lift", "place_above", "place_drop"}
+        required = {"approach", "grasp", "lift", "carry_mid", "place_above", "place_drop"}
         return (
             set(plan) == required and
             all(plan[name].success for name in required)
@@ -1559,10 +1856,10 @@ def main() -> None:
 
     def diagnose_failure(context: str) -> None:
         cube = current_ball_xyz()
-        gc = gripper_contact_center()
+        gc = gripper_object_center()
         lin_v, ang_v = cube_velocity_norms()
         print(f"    DIAG [{context}]")
-        print(f"      cube={np.round(cube, 4)}  contact_center={np.round(gc, 4)}  "
+        print(f"      cube={np.round(cube, 4)}  grasp_center={np.round(gc, 4)}  "
               f"err={np.linalg.norm(cube-gc)*100:.1f}cm")
         print(f"      cube_v={lin_v:.4f}m/s  cube_w={ang_v:.4f}rad/s  "
               f"contacts={finger_contact_count()}  "
@@ -1624,6 +1921,38 @@ def main() -> None:
                 right_hit = True
                 count += 1
         return left_hit, right_hit, count
+
+    def scratch_finger_contact_patch_span(scratch, xmat: np.ndarray) -> float:
+        points: list[np.ndarray] = []
+        for ci in range(scratch.ncon):
+            con = scratch.contact[ci]
+            g1 = int(con.geom1)
+            g2 = int(con.geom2)
+            if cube_geom_id not in (g1, g2):
+                continue
+            other = g2 if g1 == cube_geom_id else g1
+            other_body = int(model.geom_bodyid[other])
+            if other_body in (int(left_id), int(right_id)):
+                points.append(np.array(con.pos, dtype=np.float64).copy())
+        return contact_patch_span(points, xmat)
+
+    def scratch_finger_contact_alignment(scratch, xmat: np.ndarray) -> tuple[float, float]:
+        left_points: list[np.ndarray] = []
+        right_points: list[np.ndarray] = []
+        for ci in range(scratch.ncon):
+            con = scratch.contact[ci]
+            g1 = int(con.geom1)
+            g2 = int(con.geom2)
+            if cube_geom_id not in (g1, g2):
+                continue
+            other = g2 if g1 == cube_geom_id else g1
+            other_body = int(model.geom_bodyid[other])
+            if other_body == int(left_id):
+                left_points.append(np.array(con.pos, dtype=np.float64).copy())
+            elif other_body == int(right_id):
+                right_points.append(np.array(con.pos, dtype=np.float64).copy())
+        cube = scratch.qpos[ball_qpos_adr:ball_qpos_adr + 3].copy()
+        return contact_alignment_metrics(left_points, right_points, cube, xmat)
 
     def scratch_nonfinger_robot_contact(scratch) -> bool:
         finger_bodies = {int(left_id), int(right_id)}
@@ -1698,7 +2027,8 @@ def main() -> None:
               f"will try a different opening/approach axis next.")
 
     def physical_plan_penalty(plan: dict[str, IKResult],
-                              ball_xyz: np.ndarray) -> float:
+                              ball_xyz: np.ndarray,
+                              xmat: np.ndarray) -> float:
         """Reject IK poses that reach mathematically but drop the cube physically."""
         if ball_qpos_adr < 0 or ball_dof_adr < 0:
             return 0.0
@@ -1730,6 +2060,33 @@ def main() -> None:
             for _ in range(PHYSICS_SUBSTEPS):
                 mujoco.mj_step(model, sim)
 
+        def scratch_cube_inside_box() -> bool:
+            cube = sim.qpos[ball_qpos_adr:ball_qpos_adr + 3].copy()
+            x_ok = abs(float(cube[0] - BOX_POS[0])) <= (
+                BOX_SIZE[0] - CUBE_HALF_SIZE * 0.25)
+            y_ok = abs(float(cube[1] - BOX_POS[1])) <= (
+                BOX_SIZE[1] - CUBE_HALF_SIZE * 0.25)
+            z_ok = CUBE_REST_Z - 0.004 <= float(cube[2]) <= (
+                BOX_POS[2] + BOX_SIZE[2] + 0.12)
+            return bool(x_ok and y_ok and z_ok)
+
+        def scratch_grip_metrics() -> tuple[float, float, float, float]:
+            cube = sim.qpos[ball_qpos_adr:ball_qpos_adr + 3].copy()
+            pinch = scratch_gripper_object_center(sim, xmat)
+            delta = cube - pinch
+            open_axis = _unit(
+                xmat[:, 1], np.array([0.0, 1.0, 0.0], dtype=np.float64))
+            face_axis = _unit(
+                xmat[:, 0], np.array([1.0, 0.0, 0.0], dtype=np.float64))
+            approach_axis = _unit(
+                xmat[:, 2], np.array([0.0, 0.0, -1.0], dtype=np.float64))
+            return (
+                float(np.linalg.norm(delta)),
+                abs(float(np.dot(delta, open_axis))),
+                abs(float(np.dot(delta, face_axis))),
+                abs(float(np.dot(delta, approach_axis))),
+            )
+
         set_joint_positions(model, sim, arm_joints, plan["grasp"].angles)
         for item in gripper_limits:
             sim.qpos[model.jnt_qposadr[item["joint"]]] = item["open"]
@@ -1743,55 +2100,221 @@ def main() -> None:
             mujoco.mj_step(model, sim)
 
         pre_left, pre_right, pre_contacts = scratch_finger_contact_sides(sim)
+        pre_patch_span = scratch_finger_contact_patch_span(sim, xmat)
+        pre_pair_skew, pre_contact_center_err = scratch_finger_contact_alignment(sim, xmat)
         pre_min_dist = scratch_cube_robot_min_contact_dist(sim)
-        if (pre_contacts > 0 or scratch_nonfinger_robot_contact(sim) or
-                pre_min_dist < -EARLY_CONTACT_MAX_PENETRATION):
+        pre_two_sided_ok = (
+            pre_left and pre_right and
+            contact_patch_is_large(pre_contacts, pre_patch_span) and
+            pre_pair_skew <= MAX_CONTACT_PAIR_SKEW and
+            pre_contact_center_err <= MAX_CONTACT_CENTER_ERR and
+            pre_min_dist >= -EARLY_CONTACT_MAX_PENETRATION
+        )
+        if (scratch_nonfinger_robot_contact(sim) or
+                pre_min_dist < -EARLY_CONTACT_MAX_PENETRATION or
+                (pre_contacts > 0 and not pre_two_sided_ok)):
             penetration = 0.0 if pre_min_dist == float("inf") else max(0.0, -pre_min_dist)
-            return 120.0 + penetration * 1000.0 + pre_contacts * 5.0
+            return (
+                120.0 + penetration * 1000.0 + pre_contacts * 5.0 +
+                max(0.0, pre_pair_skew - MAX_CONTACT_PAIR_SKEW) * 1000.0 +
+                max(0.0, pre_contact_center_err - MAX_CONTACT_CENTER_ERR) * 1000.0
+            )
 
         grip_sim = SmoothGripperController(
             model, sim, gripper_limits, joint_to_actuator)
-        grip_sim.close(160)
-        for frame_idx in range(260):
+        grip_sim.close(GRIP_CLOSE_FRAMES)
+        for frame_idx in range(GRIP_CLOSE_TIMEOUT_FRAMES):
             write_arm(plan["grasp"].angles)
             grip_sim.step()
             step_substeps()
-            if grip_sim.done and frame_idx > 160:
+            if grip_sim.done and frame_idx > GRIP_CLOSE_FRAMES:
                 break
 
         left_hit, right_hit, contact_count = scratch_finger_contact_sides(sim)
-        if (not left_hit or not right_hit or scratch_nonfinger_robot_contact(sim)):
+        close_patch_span = scratch_finger_contact_patch_span(sim, xmat)
+        close_pair_skew, close_contact_center_err = scratch_finger_contact_alignment(sim, xmat)
+        close_min_dist = scratch_cube_robot_min_contact_dist(sim)
+        if (not left_hit or not right_hit or
+                not contact_patch_is_large(contact_count, close_patch_span) or
+                close_pair_skew > MAX_CONTACT_PAIR_SKEW or
+                close_contact_center_err > MAX_CONTACT_CENTER_ERR or
+                close_min_dist > CONTACT_CONFIRM_MAX_DIST or
+                scratch_nonfinger_robot_contact(sim)):
             missing = 0
             if not left_hit:
                 missing += 1
             if not right_hit:
                 missing += 1
-            return 80.0 + 10.0 * missing + max(0, 2 - contact_count) * 5.0
+            gap_penalty = 0.0
+            if close_min_dist != float("inf"):
+                gap_penalty = max(0.0, close_min_dist - CONTACT_CONFIRM_MAX_DIST) * 1000.0
+            area_penalty = (
+                max(0, MIN_STABLE_FINGER_CONTACTS - contact_count) * 6.0 +
+                max(0, TARGET_FINGER_CONTACTS - contact_count) * 1.5 +
+                max(0.0, MIN_CONTACT_DIVERSITY - close_patch_span) * 900.0 +
+                max(0.0, close_pair_skew - MAX_CONTACT_PAIR_SKEW) * 1000.0 +
+                max(0.0, close_contact_center_err - MAX_CONTACT_CENTER_ERR) * 1000.0
+            )
+            return 80.0 + 10.0 * missing + area_penalty + gap_penalty
+        center_err, open_err, face_err, approach_err = scratch_grip_metrics()
+        if (center_err > GRIP_LOCK_MAX_ERR or
+                open_err > GRIP_LOCK_MAX_OPEN_AXIS_ERR or
+                face_err > GRIP_LOCK_MAX_FACE_AXIS_ERR or
+                approach_err > GRIP_LOCK_MAX_APPROACH_AXIS_ERR):
+            return (
+                55.0 +
+                max(0.0, center_err - GRIP_LOCK_MAX_ERR) * 200.0 +
+                max(0.0, open_err - GRIP_LOCK_MAX_OPEN_AXIS_ERR) * 250.0 +
+                max(0.0, face_err - GRIP_LOCK_MAX_FACE_AXIS_ERR) * 200.0 +
+                max(0.0, approach_err - GRIP_LOCK_MAX_APPROACH_AXIS_ERR) * 200.0
+            )
 
+        grip_sim.hold(GRIP_HOLD_FRAMES)
+        for frame_idx in range(GRIP_HOLD_FRAMES):
+            write_arm(plan["grasp"].angles)
+            grip_sim.step()
+            step_substeps()
+            left_hit, right_hit, contact_count = scratch_finger_contact_sides(sim)
+            hold_patch_span = scratch_finger_contact_patch_span(sim, xmat)
+            hold_pair_skew, hold_contact_center_err = scratch_finger_contact_alignment(sim, xmat)
+            hold_min_dist = scratch_cube_robot_min_contact_dist(sim)
+            if (not left_hit or not right_hit or
+                    not contact_patch_is_large(contact_count, hold_patch_span) or
+                    hold_pair_skew > MAX_CONTACT_PAIR_SKEW or
+                    hold_contact_center_err > MAX_CONTACT_CENTER_ERR or
+                    hold_min_dist > CONTACT_CONFIRM_MAX_DIST or
+                    scratch_nonfinger_robot_contact(sim)):
+                return (
+                    70.0 +
+                    max(0, MIN_STABLE_FINGER_CONTACTS - contact_count) * 8.0 +
+                    max(0.0, MIN_CONTACT_DIVERSITY - hold_patch_span) * 900.0 +
+                    max(0.0, hold_pair_skew - MAX_CONTACT_PAIR_SKEW) * 1000.0 +
+                    max(0.0, hold_contact_center_err - MAX_CONTACT_CENTER_ERR) * 1000.0
+                )
+
+        grip_sim.hold(GRIP_TRANSPORT_HOLD_FRAMES)
         z_before = float(sim.qpos[ball_qpos_adr + 2])
         arm_sim = SmoothArmController(model, sim, arm_joints, joint_to_actuator)
         arm_sim.set_target(plan["lift"].angles,
-                           speed=SPEED_SLOW, min_frames=140)
-        for frame_idx in range(220):
+                           speed=SPEED_LIFT, min_frames=340)
+        for frame_idx in range(420):
             arm_sim.step()
             grip_sim.step()
             step_substeps()
-            if arm_sim.done and frame_idx > 140:
+            if arm_sim.done and frame_idx > 260:
                 break
 
         cube = sim.qpos[ball_qpos_adr:ball_qpos_adr + 3].copy()
-        err = float(np.linalg.norm(cube - scratch_gripper_contact_center(sim)))
+        err = float(np.linalg.norm(cube - scratch_gripper_object_center(sim, xmat)))
         lifted = float(cube[2] - z_before)
         left_hit, right_hit, contacts = scratch_finger_contact_sides(sim)
-        if (not left_hit or not right_hit or scratch_nonfinger_robot_contact(sim) or
-                lifted < 0.08 or err > CARRY_MAX_ERR):
-            return 60.0 + max(0.0, 0.08 - lifted) * 100.0 + err * 20.0
+        lift_patch_span = scratch_finger_contact_patch_span(sim, xmat)
+        lift_pair_skew, lift_contact_center_err = scratch_finger_contact_alignment(sim, xmat)
+        lift_min_dist = scratch_cube_robot_min_contact_dist(sim)
+        center_err, open_err, face_err, approach_err = scratch_grip_metrics()
+        if (not left_hit or not right_hit or
+                not contact_patch_is_large(contacts, lift_patch_span) or
+                lift_pair_skew > MAX_CONTACT_PAIR_SKEW or
+                lift_contact_center_err > MAX_CONTACT_CENTER_ERR or
+                scratch_nonfinger_robot_contact(sim) or
+                lift_min_dist > CONTACT_CONFIRM_MAX_DIST or
+                lifted < 0.10 or err > min(CARRY_MAX_ERR, 0.028)):
+            return (
+                60.0 +
+                max(0.0, 0.10 - lifted) * 120.0 +
+                err * 25.0 +
+                max(0, MIN_STABLE_FINGER_CONTACTS - contacts) * 8.0 +
+                max(0.0, MIN_CONTACT_DIVERSITY - lift_patch_span) * 900.0 +
+                max(0.0, lift_pair_skew - MAX_CONTACT_PAIR_SKEW) * 1000.0 +
+                max(0.0, lift_contact_center_err - MAX_CONTACT_CENTER_ERR) * 1000.0
+            )
+        if (open_err > GRIP_LOCK_MAX_OPEN_AXIS_ERR * 1.15 or
+                face_err > GRIP_LOCK_MAX_FACE_AXIS_ERR * 1.15 or
+                approach_err > GRIP_LOCK_MAX_APPROACH_AXIS_ERR * 1.15):
+            return 50.0 + center_err * 40.0
 
-        return err * 2.0
+        arm_sim.set_target(plan["carry_mid"].angles,
+                           speed=SPEED_CARRY, min_frames=520)
+        for frame_idx in range(700):
+            arm_sim.step()
+            grip_sim.step()
+            step_substeps()
+            if arm_sim.done and frame_idx > 520:
+                break
+
+        cube = sim.qpos[ball_qpos_adr:ball_qpos_adr + 3].copy()
+        mid_err = float(np.linalg.norm(cube - scratch_gripper_object_center(sim, xmat)))
+        mid_left, mid_right, mid_contacts = scratch_finger_contact_sides(sim)
+        mid_patch_span = scratch_finger_contact_patch_span(sim, xmat)
+        mid_pair_skew, mid_contact_center_err = scratch_finger_contact_alignment(sim, xmat)
+        mid_min_dist = scratch_cube_robot_min_contact_dist(sim)
+        if (not mid_left or not mid_right or
+                not contact_patch_is_large(mid_contacts, mid_patch_span) or
+                mid_pair_skew > MAX_CONTACT_PAIR_SKEW or
+                mid_contact_center_err > MAX_CONTACT_CENTER_ERR or
+                scratch_nonfinger_robot_contact(sim) or
+                mid_min_dist > CONTACT_CONFIRM_MAX_DIST or
+                mid_err > min(CARRY_MAX_ERR, 0.030)):
+            if scratch_cube_inside_box():
+                return mid_err * 3.0
+            return (
+                85.0 +
+                mid_err * 35.0 +
+                max(0, MIN_STABLE_FINGER_CONTACTS - mid_contacts) * 12.0 +
+                max(0.0, MIN_CONTACT_DIVERSITY - mid_patch_span) * 900.0 +
+                max(0.0, mid_pair_skew - MAX_CONTACT_PAIR_SKEW) * 1000.0 +
+                max(0.0, mid_contact_center_err - MAX_CONTACT_CENTER_ERR) * 1000.0
+            )
+
+        arm_sim.set_target(plan["place_above"].angles,
+                           speed=SPEED_CARRY, min_frames=560)
+        for frame_idx in range(760):
+            arm_sim.step()
+            grip_sim.step()
+            step_substeps()
+            if arm_sim.done and frame_idx > 560:
+                break
+
+        cube = sim.qpos[ball_qpos_adr:ball_qpos_adr + 3].copy()
+        carry_err = float(np.linalg.norm(cube - scratch_gripper_object_center(sim, xmat)))
+        carry_left, carry_right, carry_contacts = scratch_finger_contact_sides(sim)
+        carry_patch_span = scratch_finger_contact_patch_span(sim, xmat)
+        carry_pair_skew, carry_contact_center_err = scratch_finger_contact_alignment(sim, xmat)
+        carry_min_dist = scratch_cube_robot_min_contact_dist(sim)
+        if (not carry_left or not carry_right or
+                not contact_patch_is_large(carry_contacts, carry_patch_span) or
+                carry_pair_skew > MAX_CONTACT_PAIR_SKEW or
+                carry_contact_center_err > MAX_CONTACT_CENTER_ERR or
+                scratch_nonfinger_robot_contact(sim) or
+                carry_min_dist > CONTACT_CONFIRM_MAX_DIST or
+                carry_err > min(CARRY_MAX_ERR, 0.030)):
+            if scratch_cube_inside_box():
+                return carry_err * 3.0
+            return (
+                90.0 +
+                carry_err * 35.0 +
+                max(0, MIN_STABLE_FINGER_CONTACTS - carry_contacts) * 12.0 +
+                max(0.0, MIN_CONTACT_DIVERSITY - carry_patch_span) * 900.0 +
+                max(0.0, carry_pair_skew - MAX_CONTACT_PAIR_SKEW) * 1000.0 +
+                max(0.0, carry_contact_center_err - MAX_CONTACT_CENTER_ERR) * 1000.0
+            )
+
+        contact_bonus_penalty = max(
+            0, TARGET_FINGER_CONTACTS - min(contact_count, contacts, mid_contacts, carry_contacts)
+        ) * 0.6
+        patch_bonus_penalty = max(
+            0.0,
+            MIN_CONTACT_DIVERSITY * 1.5 -
+            min(close_patch_span, lift_patch_span, mid_patch_span, carry_patch_span),
+        ) * 120.0
+        return (
+            err * 2.0 + open_err * 4.0 + face_err * 2.0 +
+            contact_bonus_penalty + patch_bonus_penalty
+        )
 
     def compute_dynamic_ik(
         ball_xyz: np.ndarray,
-        grasp_z_offs: float = 0.0,
+        grasp_z_offs: float = INITIAL_GRASP_Z_OFFSET,
         opening_hints: list[np.ndarray] | None = None,
     ) -> dict[str, IKResult]:
         """Compute a pose-aware IK plan for the detected cube position."""
@@ -1800,7 +2323,12 @@ def main() -> None:
         ball_xyz = np.asarray(ball_xyz, dtype=np.float64).copy()
         ball_xyz[2] = max(float(ball_xyz[2]), CUBE_REST_Z)
         grasp_contact_target = ball_xyz + np.array([0.0, 0.0, grasp_z_offs])
-        place_above_contact_target = BOX_POS + np.array([0.0, 0.0, 0.16])
+        carry_mid_contact_target = np.array([
+            0.5 * (ball_xyz[0] + BOX_POS[0]),
+            0.5 * (ball_xyz[1] + BOX_POS[1]),
+            BOX_POS[2] + PLACE_ABOVE_HEIGHT,
+        ], dtype=np.float64)
+        place_above_contact_target = BOX_POS + np.array([0.0, 0.0, PLACE_ABOVE_HEIGHT])
         place_drop_contact_target = np.array([
             BOX_POS[0], BOX_POS[1],
             BOX_POS[2] + BOX_SIZE[2] + CUBE_HALF_SIZE * 0.35,
@@ -1819,11 +2347,15 @@ def main() -> None:
             z_axis = xmat[:, 2]
             grasp_target = gripper_body_target_for_contact(grasp_contact_target, xmat)
             lift_target = gripper_body_target_for_contact(
-                grasp_contact_target + np.array([0.0, 0.0, 0.18]),
+                grasp_contact_target + np.array([0.0, 0.0, GRASP_LIFT_HEIGHT]),
                 xmat,
             )
             place_above_target = gripper_body_target_for_contact(
                 place_above_contact_target,
+                xmat,
+            )
+            carry_mid_target = gripper_body_target_for_contact(
+                carry_mid_contact_target,
                 xmat,
             )
             place_drop_target = gripper_body_target_for_contact(
@@ -1834,6 +2366,7 @@ def main() -> None:
                 "approach": grasp_target - 0.13 * z_axis,
                 "grasp": grasp_target,
                 "lift": lift_target,
+                "carry_mid": carry_mid_target,
                 "place_above": place_above_target,
                 "place_drop": place_drop_target,
             }
@@ -1851,11 +2384,21 @@ def main() -> None:
             for name, target in targets.items():
                 result = solve_oriented_target(
                     scratch, target, xmat, rest=rest,
-                    pos_tol=0.005 if name not in ("place_above", "place_drop") else 0.008,
-                    ori_tol=0.16 if name not in ("place_above", "place_drop") else 0.22,
+                    pos_tol=0.005 if name not in ("carry_mid", "place_above", "place_drop") else 0.008,
+                    ori_tol=0.16 if name not in ("carry_mid", "place_above", "place_drop") else 0.22,
                 )
+                relaxed_lift = False
+                if not result.success and name == "lift":
+                    # The lift pose is a clearance waypoint.  Being a couple
+                    # of centimeters below the requested high clearance is
+                    # still safe and avoids rejecting otherwise good grasps.
+                    result = solve_oriented_target(
+                        scratch, target, xmat, rest=rest,
+                        pos_tol=0.025, ori_tol=0.35,
+                    )
+                    relaxed_lift = result.success
                 relaxed_place = False
-                if not result.success and name in ("place_above", "place_drop"):
+                if not result.success and name in ("carry_mid", "place_above", "place_drop"):
                     result = solve_gripper_center_ik(
                         model, scratch, target,
                         pinch_body_id, pinch_body_id, arm_joints,
@@ -1864,6 +2407,8 @@ def main() -> None:
                     relaxed_place = result.success
                 plan[name] = result
                 score += result.error_norm * 100.0 + result.orientation_error_norm
+                if relaxed_lift:
+                    score += 0.5
                 if relaxed_place:
                     score += 0.6
                 if not result.success:
@@ -1894,7 +2439,7 @@ def main() -> None:
             preview_best_score = float("inf")
             for idx, (base_score, plan, xmat) in enumerate(
                     candidate_plans[:PHYSICAL_EVAL_TOP_K], start=1):
-                penalty = physical_plan_penalty(plan, ball_xyz)
+                penalty = physical_plan_penalty(plan, ball_xyz, xmat)
                 total = base_score + penalty
                 y_axis = xmat[:, 1]
                 z_axis = xmat[:, 2]
@@ -1911,7 +2456,7 @@ def main() -> None:
                 best_xmat = preview_best_xmat
 
         if (best_plan is None or
-            set(best_plan) != {"approach", "grasp", "lift", "place_above", "place_drop"} or
+            set(best_plan) != {"approach", "grasp", "lift", "carry_mid", "place_above", "place_drop"} or
             any(not result.success for result in best_plan.values())):
             print("    Pose IK incomplete; falling back to position-only IK.")
             best_plan = {}
@@ -1926,17 +2471,20 @@ def main() -> None:
             fallback_grasp = gripper_body_target_for_contact(
                 grasp_contact_target, fallback_xmat)
             fallback_lift = gripper_body_target_for_contact(
-                grasp_contact_target + np.array([0.0, 0.0, 0.20]),
+                grasp_contact_target + np.array([0.0, 0.0, GRASP_LIFT_HEIGHT]),
                 fallback_xmat,
             )
             fallback_place_above = gripper_body_target_for_contact(
                 place_above_contact_target, fallback_xmat)
+            fallback_carry_mid = gripper_body_target_for_contact(
+                carry_mid_contact_target, fallback_xmat)
             fallback_place_drop = gripper_body_target_for_contact(
                 place_drop_contact_target, fallback_xmat)
             fallback_targets = {
-                "approach": ball_xyz + np.array([0.0, 0.0, 0.15]),
+                "approach": fallback_grasp - 0.13 * fallback_xmat[:, 2],
                 "grasp": fallback_grasp,
                 "lift": fallback_lift,
+                "carry_mid": fallback_carry_mid,
                 "place_above": fallback_place_above,
                 "place_drop": fallback_place_drop,
             }
@@ -1953,7 +2501,11 @@ def main() -> None:
 
         if best_xmat is not None:
             dynamic_grasp_xmat = best_xmat.copy()
-        for name in ("approach", "grasp", "lift", "place_above", "place_drop"):
+            print(f"    Selected grasp frame: "
+                  f"open={np.round(best_xmat[:, 1], 2)} "
+                  f"approach={np.round(best_xmat[:, 2], 2)} "
+                  f"grasp_z_offset={grasp_z_offs*1000:.0f}mm")
+        for name in ("approach", "grasp", "lift", "carry_mid", "place_above", "place_drop"):
             result = best_plan[name]
             status = "reachable" if result.success else "UNREACHABLE"
             print(f"  IK {name:8s}: {status}, pos={result.error_norm:.4f}m, "
@@ -1962,7 +2514,7 @@ def main() -> None:
         return best_plan
 
     def cube_carry_metrics() -> tuple[float, float]:
-        gc = gripper_contact_center()
+        gc = gripper_object_center()
         cube = current_ball_xyz()
         err = float(np.linalg.norm(cube - gc))
         lifted = float(cube[2] - CUBE_REST_Z)
@@ -1970,11 +2522,16 @@ def main() -> None:
 
     def cube_is_secured() -> bool:
         err, lifted = cube_carry_metrics()
-        left_pad_hit, right_pad_hit, _ = pad_cube_contact_sides()
+        left_pad_hit, right_pad_hit, pad_contacts = pad_cube_contact_sides()
+        patch_span = finger_contact_patch_span()
+        pair_skew, contact_center_err = finger_contact_alignment()
         return (
             lifted > CARRY_MIN_LIFT and
             err < CARRY_MAX_ERR and
-            left_pad_hit and right_pad_hit
+            left_pad_hit and right_pad_hit and
+            contact_patch_is_large(pad_contacts, patch_span) and
+            pair_skew <= MAX_CONTACT_PAIR_SKEW and
+            contact_center_err <= MAX_CONTACT_CENTER_ERR
         )
 
     def trusted_cube_xyz() -> np.ndarray:
@@ -1984,21 +2541,37 @@ def main() -> None:
 
     def pre_close_alignment_ok(label: str) -> bool:
         cube = current_ball_xyz()
-        pinch = gripper_contact_center()
-        xy_err = float(np.linalg.norm((pinch - cube)[:2]))
-        z_err = abs(float(pinch[2] - cube[2]))
-        left = data.xpos[left_id].copy()
-        right = data.xpos[right_id].copy()
-        span = right - left
-        opening_axis = _unit(span, np.array([0.0, 1.0, 0.0], dtype=np.float64))
-        center_delta = cube - pinch
+        object_center = gripper_object_center()
+        xy_err = float(np.linalg.norm((object_center - cube)[:2]))
+        z_err = abs(float(object_center[2] - cube[2]))
+        if dynamic_grasp_xmat is not None:
+            opening_axis = _unit(
+                dynamic_grasp_xmat[:, 1],
+                np.array([0.0, 1.0, 0.0], dtype=np.float64),
+            )
+            face_axis = _unit(
+                dynamic_grasp_xmat[:, 0],
+                np.array([1.0, 0.0, 0.0], dtype=np.float64),
+            )
+        else:
+            left = data.xpos[left_id].copy()
+            right = data.xpos[right_id].copy()
+            span = right - left
+            opening_axis = _unit(span, np.array([0.0, 1.0, 0.0], dtype=np.float64))
+            face_axis = _unit(
+                np.cross(opening_axis, np.array([0.0, 0.0, -1.0])),
+                np.array([1.0, 0.0, 0.0], dtype=np.float64),
+            )
+        center_delta = cube - object_center
         open_axis_err = abs(float(np.dot(center_delta, opening_axis)))
+        face_axis_err = abs(float(np.dot(center_delta, face_axis)))
         center_err = float(np.linalg.norm(center_delta))
         bad_contact, bad_name = cube_nonfinger_robot_contact()
         print(f"    {label}: cube={np.round(cube, 4)} "
-              f"pinch={np.round(pinch, 4)} "
+              f"grasp_center={np.round(object_center, 4)} "
               f"xy_err={xy_err*100:.1f}cm z_err={z_err*100:.1f}cm "
               f"open_axis={open_axis_err*100:.1f}cm "
+              f"face_axis={face_axis_err*100:.1f}cm "
               f"center={center_err*100:.1f}cm")
         if bad_contact:
             print(f"    {label}: rejected, cube is touching non-finger robot part "
@@ -2008,6 +2581,7 @@ def main() -> None:
             xy_err <= PRE_CLOSE_MAX_XY_ERR and
             z_err <= PRE_CLOSE_MAX_Z_ERR and
             open_axis_err <= PRE_CLOSE_MAX_OPEN_AXIS_ERR and
+            face_axis_err <= PRE_CLOSE_MAX_FACE_AXIS_ERR and
             center_err <= PRE_CLOSE_MAX_CENTER_ERR
         )
 
@@ -2212,11 +2786,20 @@ def main() -> None:
                     diagnose_failure("approach requested with incomplete plan")
                     restart_search("incomplete IK plan before approach")
                     return
+                print(">>> Phase 2 : Open gripper before approach")
+                gripper_ctrl.open(duration_frames=55)
+                sub = 10
+                status_msg = "Opening gripper before approach ..."
+                return
+            if sub == 10:
+                if not gripper_ctrl.done or not gripper_is_open():
+                    return
                 print(">>> Phase 2 : Approach")
                 arm_ctrl.set_target(dynamic_ik_plan["approach"].angles, speed=SPEED_NORMAL)
                 sub = 1
                 status_msg = "Approaching cube ..."
-            if arm_ctrl.done:
+                return
+            if sub == 1 and arm_ctrl.done:
                 fresh = capture_cube_from_rgb("pre-grasp confirm")
                 if fresh is None:
                     if cube_static_anchor_active and detected_ball_pos is not None:
@@ -2302,16 +2885,27 @@ def main() -> None:
 
         # 鈹€鈹€ Phase 3:  descend 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
         elif phase == 3:
+            if sub == 9:
+                if not gripper_ctrl.done or not gripper_is_open():
+                    return
+                sub = 0
+                return
             if sub == 0:
                 if detected_ball_pos is None:
                     print("    No cube position — restarting search")
                     restart_search("lost cube position before descend")
                     return
+                if not gripper_is_open():
+                    print("    Gripper is not fully open; opening before descent.")
+                    gripper_ctrl.open(duration_frames=35)
+                    sub = 9
+                    status_msg = "Opening gripper before descent ..."
+                    return
                 # Align the real jaw center with the cube center.  Retries
                 # sample slightly different heights instead of driving below
                 # the cube, which caused table/box scraping and side misses.
-                offsets = [0.0, 0.004, -0.004, 0.008, -0.008]
-                z_offs = offsets[min(regrasp_count, len(offsets) - 1)]
+                z_offs = GRASP_Z_OFFSETS[
+                    min(regrasp_count, len(GRASP_Z_OFFSETS) - 1)]
                 print(f">>> Phase 3 : Descend  (grasp Z offset = {z_offs*1000:.0f} mm)")
                 # Recompute IK with deeper grasp on each retry
                 dynamic_ik_plan = compute_dynamic_ik(
@@ -2328,20 +2922,24 @@ def main() -> None:
                 status_msg = f"Descending (retry {regrasp_count}) ..."
             if sub == 1 and not arm_ctrl.done and cube_touching_robot():
                 min_dist = cube_robot_min_contact_dist()
-                print(f"    Early robot-cube contact during descent "
-                      f"(min_dist={min_dist*1000:.2f} mm); "
-                      "aborting this grasp posture.")
-                remember_failed_grasp_frame("early contact during descent")
-                release_cube_static_anchor("early contact during descent")
-                if plan_is_ready(dynamic_ik_plan):
-                    arm_ctrl.set_target(dynamic_ik_plan["approach"].angles,
-                                        speed=SPEED_NORMAL, min_frames=80)
-                regrasp_count += 1
-                if regrasp_count >= MAX_REGRASP:
-                    restart_search("repeated early cube collision")
-                else:
-                    phase = 8; sub = 0
-                return
+                bad_contact, bad_name = cube_nonfinger_robot_contact()
+                if bad_contact or min_dist < -EARLY_CONTACT_MAX_PENETRATION:
+                    print(f"    Early robot-cube contact during descent "
+                          f"(min_dist={min_dist*1000:.2f} mm); "
+                          "aborting this grasp posture.")
+                    if bad_contact:
+                        print(f"    Early contact body: {bad_name}")
+                    remember_failed_grasp_frame("early contact during descent")
+                    release_cube_static_anchor("early contact during descent")
+                    if plan_is_ready(dynamic_ik_plan):
+                        arm_ctrl.set_target(dynamic_ik_plan["approach"].angles,
+                                            speed=SPEED_NORMAL, min_frames=80)
+                    regrasp_count += 1
+                    if regrasp_count >= MAX_REGRASP:
+                        restart_search("repeated early cube collision")
+                    else:
+                        phase = 8; sub = 0
+                    return
             if arm_ctrl.done:
                 if cube_touching_robot():
                     min_dist = cube_robot_min_contact_dist()
@@ -2361,8 +2959,8 @@ def main() -> None:
                         else:
                             phase = 8; sub = 0
                         return
-                offsets = [0.0, 0.004, -0.004, 0.008, -0.008]
-                z_offs = offsets[min(regrasp_count, len(offsets) - 1)]
+                z_offs = GRASP_Z_OFFSETS[
+                    min(regrasp_count, len(GRASP_Z_OFFSETS) - 1)]
                 if not pre_close_alignment_ok("Pre-close alignment"):
                     local_replan_count += 1
                     if local_replan_count <= MAX_LOCAL_REPLAN:
@@ -2396,11 +2994,11 @@ def main() -> None:
         # 鈹€鈹€ Phase 4:  close gripper 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
         elif phase == 4:
             if sub == 0:
-                gc = gripper_contact_center()
+                gc = gripper_object_center()
                 ball = current_ball_xyz()
                 err = np.linalg.norm(ball - gc)
-                print(f"    Contact center->cube: {err*100:.1f}cm  "
-                      f"(contact Z={gc[2]:.3f}, cube Z={ball[2]:.3f})")
+                print(f"    Grasp center->cube: {err*100:.1f}cm  "
+                      f"(grasp Z={gc[2]:.3f}, cube Z={ball[2]:.3f})")
                 grip_contact_hold = 0
                 grip_close_frames = 0
                 gripper_ctrl.close(duration_frames=GRIP_CLOSE_FRAMES)
@@ -2410,6 +3008,9 @@ def main() -> None:
                 grip_close_frames += 1
                 contacts = finger_contact_count()
                 left_pad_hit, right_pad_hit, pad_contacts = pad_cube_contact_sides()
+                patch_span = finger_contact_patch_span()
+                pair_skew, contact_center_err = finger_contact_alignment()
+                min_dist = cube_robot_min_contact_dist()
                 bad_contact, bad_name = cube_nonfinger_robot_contact()
                 force = gripper_ctrl._max_actuator_force()
                 geom = grip_geometry_metrics()
@@ -2425,18 +3026,32 @@ def main() -> None:
                         phase = 8; sub = 0
                     return
                 if (left_pad_hit and right_pad_hit and
-                        force >= GRIP_LOCK_MIN_FORCE and bool(geom["ok"])):
+                        contact_patch_is_large(pad_contacts, patch_span) and
+                        pair_skew <= MAX_CONTACT_PAIR_SKEW and
+                        contact_center_err <= MAX_CONTACT_CENTER_ERR and
+                        min_dist <= CONTACT_CONFIRM_MAX_DIST and
+                        force >= GRIP_CONFIRM_FORCE and bool(geom["ok"])):
                     grip_contact_hold += 1
                 else:
                     grip_contact_hold = 0
 
                 if grip_contact_hold == 1:
                     print(f"    Two-sided finger contact detected while closing: "
-                          f"finger_contacts={pad_contacts} force={force:.2f}N "
+                          f"finger_contacts={pad_contacts} "
+                          f"patch_span={patch_span*1000:.1f}mm "
+                          f"pair_skew={pair_skew*1000:.1f}mm "
+                          f"contact_center_err={contact_center_err*1000:.1f}mm "
+                          f"contact_dist={min_dist*1000:.2f}mm "
+                          f"force={force:.2f}N "
                           f"geom_center={geom['center_err']*100:.1f}cm")
                 elif grip_close_frames % 45 == 0:
                     print(f"    Closing progress: left={left_pad_hit} right={right_pad_hit} "
-                          f"finger_contacts={pad_contacts} force={force:.2f}N "
+                          f"finger_contacts={pad_contacts} "
+                          f"patch_span={patch_span*1000:.1f}mm "
+                          f"pair_skew={pair_skew*1000:.1f}mm "
+                          f"contact_center_err={contact_center_err*1000:.1f}mm "
+                          f"contact_dist={min_dist*1000:.2f}mm "
+                          f"force={force:.2f}N "
                           f"hold={grip_contact_hold}/{GRIP_CONTACT_HOLD_FRAMES} "
                           f"geom_ok={bool(geom['ok'])} "
                           f"center={geom['center_err']*100:.1f}cm "
@@ -2446,6 +3061,10 @@ def main() -> None:
                 if grip_contact_hold >= GRIP_CONTACT_HOLD_FRAMES:
                     print(f"    Real two-sided finger contact confirmed: "
                           f"body_contacts={contacts} finger_contacts={pad_contacts} "
+                          f"patch_span={patch_span*1000:.1f}mm "
+                          f"pair_skew={pair_skew*1000:.1f}mm "
+                          f"contact_center_err={contact_center_err*1000:.1f}mm "
+                          f"contact_dist={min_dist*1000:.2f}mm "
                           f"force={force:.2f}N "
                           f"hold={grip_contact_hold}/{GRIP_CONTACT_HOLD_FRAMES}")
                     if activate_grip_lock("after close"):
@@ -2465,6 +3084,10 @@ def main() -> None:
                 if gripper_ctrl.done or grip_close_frames >= GRIP_CLOSE_TIMEOUT_FRAMES:
                     print(f"    Need two-sided real finger contact: left={left_pad_hit} "
                           f"right={right_pad_hit} finger_contacts={pad_contacts} "
+                          f"patch_span={patch_span*1000:.1f}mm "
+                          f"pair_skew={pair_skew*1000:.1f}mm "
+                          f"contact_center_err={contact_center_err*1000:.1f}mm "
+                          f"contact_dist={min_dist*1000:.2f}mm "
                           f"force={force:.2f}N "
                           f"hold={grip_contact_hold}/{GRIP_CONTACT_HOLD_FRAMES} "
                           f"geom_ok={bool(geom['ok'])} "
@@ -2481,12 +3104,24 @@ def main() -> None:
             elif sub == 2:
                 contacts = finger_contact_count()
                 left_pad_hit, right_pad_hit, pad_contacts = pad_cube_contact_sides()
+                patch_span = finger_contact_patch_span()
+                pair_skew, contact_center_err = finger_contact_alignment()
+                min_dist = cube_robot_min_contact_dist()
                 force = gripper_ctrl._max_actuator_force()
                 geom = grip_geometry_metrics()
-                if not (left_pad_hit and right_pad_hit and bool(geom["ok"])):
+                if not (left_pad_hit and right_pad_hit and
+                        contact_patch_is_large(pad_contacts, patch_span) and
+                        pair_skew <= MAX_CONTACT_PAIR_SKEW and
+                        contact_center_err <= MAX_CONTACT_CENTER_ERR and
+                        min_dist <= CONTACT_CONFIRM_MAX_DIST and bool(geom["ok"])):
                     print(f"    Grasp destabilized during pre-lift hold: "
                           f"left={left_pad_hit} right={right_pad_hit} "
-                          f"finger_contacts={pad_contacts} force={force:.2f}N "
+                          f"finger_contacts={pad_contacts} "
+                          f"patch_span={patch_span*1000:.1f}mm "
+                          f"pair_skew={pair_skew*1000:.1f}mm "
+                          f"contact_center_err={contact_center_err*1000:.1f}mm "
+                          f"contact_dist={min_dist*1000:.2f}mm "
+                          f"force={force:.2f}N "
                           f"center={geom['center_err']*100:.1f}cm")
                     remember_failed_grasp_frame("pre-lift hold lost contact")
                     diagnose_failure("pre-lift grip lost contact")
@@ -2498,7 +3133,12 @@ def main() -> None:
                     return
                 if grip_close_frames % 40 == 0:
                     print(f"    Pre-lift grip hold: contacts={contacts} "
-                          f"finger_contacts={pad_contacts} force={force:.2f}N "
+                          f"finger_contacts={pad_contacts} "
+                          f"patch_span={patch_span*1000:.1f}mm "
+                          f"pair_skew={pair_skew*1000:.1f}mm "
+                          f"contact_center_err={contact_center_err*1000:.1f}mm "
+                          f"contact_dist={min_dist*1000:.2f}mm "
+                          f"force={force:.2f}N "
                           f"center={geom['center_err']*100:.1f}cm")
                 grip_close_frames += 1
                 if gripper_ctrl.done:
@@ -2509,8 +3149,9 @@ def main() -> None:
         elif phase == 5:
             if sub == 0:
                 print(">>> Phase 5 : Lift & verify")
+                gripper_ctrl.hold(duration_frames=GRIP_TRANSPORT_HOLD_FRAMES)
                 arm_ctrl.set_target(dynamic_ik_plan["lift"].angles,
-                                    speed=SPEED_LIFT, min_frames=260)
+                                    speed=SPEED_LIFT, min_frames=340)
                 sub = 1
                 status_msg = "Lifting ..."
             if arm_ctrl.done:
@@ -2525,7 +3166,6 @@ def main() -> None:
                 if cube_is_secured():
                     print(f"    Grasp SUCCESS after {regrasp_count} retries")
                     rejected_grasp_frames = []
-                    dynamic_grasp_xmat = None
                     phase = 6; sub = 0; regrasp_count = 0
                 else:
                     regrasp_count += 1
@@ -2541,23 +3181,51 @@ def main() -> None:
         # 鈹€鈹€ Phase 6:  move to box 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
         elif phase == 6:
             if sub == 0:
-                print(">>> Phase 6 : Move above box")
-                arm_ctrl.set_target(dynamic_ik_plan["place_above"].angles,
-                                    speed=SPEED_CARRY, min_frames=480)
+                print(">>> Phase 6 : Carry via midpoint")
+                arm_ctrl.set_target(dynamic_ik_plan["carry_mid"].angles,
+                                    speed=SPEED_CARRY, min_frames=520)
                 sub = 1
-                status_msg = "Moving above box ..."
+                status_msg = "Carrying cube ..."
             elif sub == 1 and arm_ctrl.done:
                 if not cube_is_secured():
+                    if cube_inside_box():
+                        cube = current_ball_xyz()
+                        print(f"    Cube already reached box during midpoint carry: "
+                              f"{np.round(cube, 3)}")
+                        phase = 7; sub = 0
+                        return
+                    diagnose_failure("cube dropped before carry midpoint")
+                    restart_search("cube dropped before carry midpoint")
+                    return
+                print(">>> Phase 6a : Move above box")
+                arm_ctrl.set_target(dynamic_ik_plan["place_above"].angles,
+                                    speed=SPEED_CARRY, min_frames=560)
+                sub = 2
+                status_msg = "Moving above box ..."
+            elif sub == 2 and arm_ctrl.done:
+                if not cube_is_secured():
+                    if cube_inside_box():
+                        cube = current_ball_xyz()
+                        print(f"    Cube already reached box during carry: "
+                              f"{np.round(cube, 3)}")
+                        phase = 7; sub = 0
+                        return
                     diagnose_failure("cube dropped while carrying")
                     restart_search("cube dropped while carrying")
                     return
                 print(">>> Phase 6b : Lower into box")
                 arm_ctrl.set_target(dynamic_ik_plan["place_drop"].angles,
-                                    speed=SPEED_PLACE, min_frames=260)
-                sub = 2
+                                    speed=SPEED_PLACE, min_frames=340)
+                sub = 3
                 status_msg = "Lowering into box ..."
-            elif sub == 2 and arm_ctrl.done:
+            elif sub == 3 and arm_ctrl.done:
                 if not cube_is_secured():
+                    if cube_inside_box():
+                        cube = current_ball_xyz()
+                        print(f"    Cube already settled in box during lowering: "
+                              f"{np.round(cube, 3)}")
+                        phase = 7; sub = 0
+                        return
                     diagnose_failure("cube dropped before release")
                     restart_search("cube dropped before release")
                     return
@@ -2567,6 +3235,7 @@ def main() -> None:
                 print(">>> Phase 7 : Release into box")
                 release_cube_static_anchor("release in box")
                 release_grip_lock("release in box")
+                dynamic_grasp_xmat = None
                 gripper_ctrl.open(duration_frames=25)
                 sub = 1
                 status_msg = "Releasing ..."
@@ -2600,8 +3269,29 @@ def main() -> None:
                 bv = float(np.linalg.norm(data.qvel[ball_dof_adr:ball_dof_adr+3]))
                 if bv < 0.02:
                     print(f"    Cube settled (|v|={bv:.3f} m/s)")
-                    # Re-scan to find cube after failed grasp
-                    restart_search("cube dropped after failed grasp")
+                    if cube_inside_box():
+                        print("    Cube is already inside the target box after retry.")
+                        phase = 7; sub = 0
+                        return
+                    set_cube_static_anchor("local re-grasp retry")
+                    detected_ball_pos = trusted_cube_xyz()
+                    z_offs = GRASP_Z_OFFSETS[
+                        min(regrasp_count, len(GRASP_Z_OFFSETS) - 1)]
+                    dynamic_ik_plan = compute_dynamic_ik(
+                        detected_ball_pos,
+                        grasp_z_offs=z_offs,
+                        opening_hints=detected_opening_hints,
+                    )
+                    if plan_is_ready(dynamic_ik_plan):
+                        print("    Local re-grasp plan ready; retrying without "
+                              "returning to global scan.")
+                        pregrasp_replan_count = 0
+                        local_replan_count = 0
+                        phase = 2; sub = 0
+                        status_msg = "Retrying grasp from current cube pose ..."
+                        return
+                    diagnose_failure("local re-grasp planning failed")
+                    restart_search("local re-grasp plan failed")
                     return
                 else:
                     status_msg = f"Waiting for cube to settle (|v|={bv:.3f}) ..."

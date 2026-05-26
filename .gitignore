@@ -187,3 +187,6 @@ rdf/
 __pycache__
 *.pyc
 *.pyc
+
+MUJOCO_LOG.TXT
+*.temp

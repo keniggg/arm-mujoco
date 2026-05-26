@@ -21,20 +21,42 @@ class FTReading:
 
 
 class ForceTorqueSensor:
-    """Reads 6-axis F/T from MuJoCo sensor data."""
+    """Reads 6-axis F/T from MuJoCo sensor data.
 
-    def __init__(self, model, force_name: str = "wrist_force", torque_name: str = "wrist_torque"):
+    MuJoCo exposes instantaneous constraint-solver forces, which can contain
+    high-frequency contact chatter.  A small low-pass filter makes the display
+    behave more like a real sampled F/T sensor without changing simulation
+    dynamics or the gripper controller.
+    """
+
+    def __init__(self, model, force_name: str = "wrist_force",
+                 torque_name: str = "wrist_torque",
+                 filter_alpha: float = 0.25):
         self.force_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SENSOR, force_name)
         self.torque_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SENSOR, torque_name)
         if self.force_id < 0 or self.torque_id < 0:
             raise RuntimeError(f"Sensors '{force_name}'/'{torque_name}' not found in model.")
         self.force_adr = int(model.sensor_adr[self.force_id])
         self.torque_adr = int(model.sensor_adr[self.torque_id])
+        self.filter_alpha = float(np.clip(filter_alpha, 0.0, 1.0))
+        self._force_filtered: np.ndarray | None = None
+        self._torque_filtered: np.ndarray | None = None
 
     def read(self, data) -> FTReading:
-        force = data.sensordata[self.force_adr:self.force_adr + 3].copy()
-        torque = data.sensordata[self.torque_adr:self.torque_adr + 3].copy()
-        return FTReading(force=force, torque=torque, timestamp=float(data.time))
+        force_raw = data.sensordata[self.force_adr:self.force_adr + 3].copy()
+        torque_raw = data.sensordata[self.torque_adr:self.torque_adr + 3].copy()
+        if self._force_filtered is None:
+            self._force_filtered = force_raw
+            self._torque_filtered = torque_raw
+        else:
+            a = self.filter_alpha
+            self._force_filtered += a * (force_raw - self._force_filtered)
+            self._torque_filtered += a * (torque_raw - self._torque_filtered)
+        return FTReading(
+            force=self._force_filtered.copy(),
+            torque=self._torque_filtered.copy(),
+            timestamp=float(data.time),
+        )
 
 class FTDisplay:
     """Real-time scrolling 6-axis force/torque plot using OpenCV."""
