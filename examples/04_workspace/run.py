@@ -107,6 +107,7 @@ GRASP_ORI_WEIGHT = 0.36
 GRASP_ORI_TOL = 0.08
 LIFT_ORI_TOL = 0.12
 PLACE_ORI_TOL = 0.22
+GRASP_WORLD_AXIS_WEIGHT = 14.0
 RGBD_MAX_ESTIMATE_SPREAD_M = 0.055
 RGBD_MAX_PLANE_RESIDUAL_M = 0.010
 RGBD_MIN_PLANE_INLIERS = 35
@@ -188,6 +189,8 @@ VISION_REPLAN_DELTA = 0.018
 LOCAL_RGBD_KEEP_PLAN_DELTA = 0.008
 MAX_PREGRASP_REPLANS = 1
 PREGRASP_REAPPROACH_TOL = 0.020
+GRIPPER_OPEN_TOL = 0.0045
+GRIPPER_OPEN_WAIT_FRAMES = 90
 APPROACH_CAPTURE_PROGRESS = 0.88
 DESCEND_CLOSE_PROGRESS = 0.92
 LOCAL_RETRACT_MIN_FRAMES = 80
@@ -1181,6 +1184,17 @@ def _tangent_xy(radial: np.ndarray) -> np.ndarray:
                  np.array([0.0, 1.0, 0.0], dtype=np.float64))
 
 
+def _nearest_world_opening_axis(hint: np.ndarray) -> np.ndarray:
+    hint = np.asarray(hint, dtype=np.float64)
+    if hint.size < 2:
+        return np.array([0.0, 1.0, 0.0], dtype=np.float64)
+    if abs(float(hint[0])) >= abs(float(hint[1])):
+        sign = 1.0 if float(hint[0]) >= 0.0 else -1.0
+        return np.array([sign, 0.0, 0.0], dtype=np.float64)
+    sign = 1.0 if float(hint[1]) >= 0.0 else -1.0
+    return np.array([0.0, sign, 0.0], dtype=np.float64)
+
+
 def workspace_project_xy(xy: np.ndarray) -> np.ndarray:
     xy = np.asarray(xy, dtype=np.float64).copy()
     xy[0] = float(np.clip(xy[0], -WORKSPACE_XY_LIMIT, WORKSPACE_XY_LIMIT))
@@ -1276,7 +1290,11 @@ def generate_grasp_orientations(
         tangent, -tangent,
     ])
     if opening_hints:
-        base_hints.extend(opening_hints)
+        # The red square contour is strongly perspective-dependent in the
+        # wrist camera.  Use it only to choose the nearest cube-side/world
+        # axis; raw diagonal contour axes led to awkward diagonal jaw poses.
+        for hint in opening_hints:
+            base_hints.append(_nearest_world_opening_axis(hint))
 
     z_axis = np.array([0.0, 0.0, -1.0], dtype=np.float64)
     for hint in base_hints:
@@ -1310,7 +1328,7 @@ def grasp_stability_score(xmat: np.ndarray, ball_xyz: np.ndarray) -> float:
     return (
         80.0 * horizontal_tilt +
         20.0 * max(0.0, 0.999 - downward) +
-        1.2 * max(0.0, 0.98 - world_axis_alignment) +
+        GRASP_WORLD_AXIS_WEIGHT * max(0.0, 0.98 - world_axis_alignment) +
         0.15 * radial_opening +
         0.10 * max(0.0, -tangent_opening_signed) +
         0.08 * max(0.0, 0.75 - tangent_opening)
@@ -1649,6 +1667,7 @@ def main() -> None:
     detected_opening_hints: list[np.ndarray] = []
     dynamic_ik_plan: dict[str, IKResult] = {}
     dynamic_grasp_xmat: np.ndarray | None = None
+    dynamic_grasp_z_offset = INITIAL_GRASP_Z_OFFSET
     rejected_grasp_frames: list[tuple[np.ndarray, np.ndarray]] = []
     rgbd_scan_estimates: list[np.ndarray] = []
     rgbd_scan_hints: list[np.ndarray] = []
@@ -1669,6 +1688,7 @@ def main() -> None:
     local_replan_count = 0
     grip_contact_hold = 0
     grip_close_frames = 0
+    gripper_open_wait_frames = 0
     prelift_lost_frames = 0
     ball_z_before_lift = 0.0
     status_msg = "IDLE 鈥?use cube_x/y/z & start_demo sliders"
@@ -1971,12 +1991,15 @@ def main() -> None:
     def gripper_contact_center() -> np.ndarray:
         return data.xpos[pinch_body_id].copy()
 
-    def gripper_is_open(tol: float = 0.0025) -> bool:
+    def gripper_open_error() -> float:
+        err = 0.0
         for item in gripper_limits:
             q = float(data.qpos[model.jnt_qposadr[item["joint"]]])
-            if abs(q - float(item["open"])) > tol:
-                return False
-        return True
+            err = max(err, abs(q - float(item["open"])))
+        return err
+
+    def gripper_is_open(tol: float = GRIPPER_OPEN_TOL) -> bool:
+        return gripper_open_error() <= tol
 
     def scratch_gripper_contact_center(scratch) -> np.ndarray:
         return scratch.xpos[pinch_body_id].copy()
@@ -2205,11 +2228,14 @@ def main() -> None:
             hint_msg = ""
             if detected_opening_hints:
                 hint_msg = f" opening_hint={np.round(detected_opening_hints[0][:2], 3)}"
+            truth = current_ball_xyz()
+            truth_err = float(np.linalg.norm(est_xyz - truth))
             spread_msg = (
                 f" spread={detector.last_estimate_spread_m*100:.1f}cm/"
                 f"{detector.last_detection_spread_px:.1f}px"
                 f" plane={detector.last_plane_residual_m*1000:.1f}mm/"
                 f"{detector.last_plane_inliers}"
+                f" true_err={truth_err*100:.1f}cm"
             )
             print(f"    Vision {label}: uv={center_uv} r={radius}px "
                   f"xyz={np.round(est_xyz, 3)}{spread_msg}{hint_msg}")
@@ -2823,16 +2849,18 @@ def main() -> None:
 
     def compute_dynamic_ik(
         ball_xyz: np.ndarray,
-        grasp_z_offs: float = INITIAL_GRASP_Z_OFFSET,
+        grasp_z_offs: float | None = None,
         opening_hints: list[np.ndarray] | None = None,
         preview_top_k: int = PHYSICAL_EVAL_TOP_K,
     ) -> dict[str, IKResult]:
         """Compute a pose-aware IK plan for the detected cube position."""
-        nonlocal dynamic_grasp_xmat
+        nonlocal dynamic_grasp_xmat, dynamic_grasp_z_offset
         dynamic_grasp_xmat = None
         ball_xyz = np.asarray(ball_xyz, dtype=np.float64).copy()
         ball_xyz[2] = float(np.clip(ball_xyz[2], VISION_Z_MIN, VISION_Z_MAX))
-        grasp_contact_target = ball_xyz + np.array([0.0, 0.0, grasp_z_offs])
+        z_offset_candidates = (
+            list(GRASP_Z_OFFSETS) if grasp_z_offs is None else [float(grasp_z_offs)]
+        )
         carry_mid_contact_target = np.array([
             0.5 * (ball_xyz[0] + BOX_POS[0]),
             0.5 * (ball_xyz[1] + BOX_POS[1]),
@@ -2846,118 +2874,127 @@ def main() -> None:
 
         best_plan: dict[str, IKResult] | None = None
         best_xmat: np.ndarray | None = None
+        best_z_offs = float(z_offset_candidates[0])
         best_score = float("inf")
-        candidate_plans: list[tuple[float, dict[str, IKResult], np.ndarray]] = []
+        candidate_plans: list[tuple[float, dict[str, IKResult], np.ndarray, float]] = []
         home_rest = np.array(
             [data.qpos[model.jnt_qposadr[j]] for j in arm_joints],
             dtype=np.float64,
         )
 
-        for xmat in generate_grasp_orientations(ball_xyz, opening_hints):
-            z_axis = xmat[:, 2]
-            grasp_target = gripper_body_target_for_contact(grasp_contact_target, xmat)
-            lift_target = gripper_body_target_for_contact(
-                grasp_contact_target + np.array([0.0, 0.0, GRASP_LIFT_HEIGHT]),
-                xmat,
-            )
-            place_above_target = gripper_body_target_for_contact(
-                place_above_contact_target,
-                xmat,
-            )
-            carry_mid_target = gripper_body_target_for_contact(
-                carry_mid_contact_target,
-                xmat,
-            )
-            place_drop_target = gripper_body_target_for_contact(
-                place_drop_contact_target,
-                xmat,
-            )
-            targets = {
-                "approach": grasp_target - 0.13 * z_axis,
-                "grasp": grasp_target,
-                "lift": lift_target,
-                "carry_mid": carry_mid_target,
-                "place_above": place_above_target,
-                "place_drop": place_drop_target,
-            }
-            scratch = mujoco.MjData(model)
-            scratch.qpos[:] = data.qpos[:]
-            scratch.qvel[:] = 0.0
-            for item in gripper_limits:
-                scratch.qpos[model.jnt_qposadr[item["joint"]]] = item["open"]
-            mujoco.mj_forward(model, scratch)
-
-            plan: dict[str, IKResult] = {}
-            ok = True
-            score = 0.0
-            rest = home_rest
-            for name, target in targets.items():
-                if name in ("approach", "grasp"):
-                    pos_tol = 0.004
-                    ori_tol = GRASP_ORI_TOL
-                elif name == "lift":
-                    pos_tol = 0.007
-                    ori_tol = LIFT_ORI_TOL
-                else:
-                    pos_tol = 0.008
-                    ori_tol = PLACE_ORI_TOL
-                result = solve_oriented_target(
-                    scratch, target, xmat, rest=rest,
-                    pos_tol=pos_tol,
-                    ori_tol=ori_tol,
+        for current_z_offs in z_offset_candidates:
+            grasp_contact_target = ball_xyz + np.array(
+                [0.0, 0.0, float(current_z_offs)], dtype=np.float64)
+            for xmat in generate_grasp_orientations(ball_xyz, opening_hints):
+                z_axis = xmat[:, 2]
+                grasp_target = gripper_body_target_for_contact(grasp_contact_target, xmat)
+                lift_target = gripper_body_target_for_contact(
+                    grasp_contact_target + np.array([0.0, 0.0, GRASP_LIFT_HEIGHT]),
+                    xmat,
                 )
-                relaxed_lift = False
-                if not result.success and name == "lift":
-                    # The lift pose is a clearance waypoint.  Being a couple
-                    # of centimeters below the requested high clearance is
-                    # still safe and avoids rejecting otherwise good grasps.
+                place_above_target = gripper_body_target_for_contact(
+                    place_above_contact_target,
+                    xmat,
+                )
+                carry_mid_target = gripper_body_target_for_contact(
+                    carry_mid_contact_target,
+                    xmat,
+                )
+                place_drop_target = gripper_body_target_for_contact(
+                    place_drop_contact_target,
+                    xmat,
+                )
+                targets = {
+                    "approach": grasp_target - 0.13 * z_axis,
+                    "grasp": grasp_target,
+                    "lift": lift_target,
+                    "carry_mid": carry_mid_target,
+                    "place_above": place_above_target,
+                    "place_drop": place_drop_target,
+                }
+                scratch = mujoco.MjData(model)
+                scratch.qpos[:] = data.qpos[:]
+                scratch.qvel[:] = 0.0
+                for item in gripper_limits:
+                    scratch.qpos[model.jnt_qposadr[item["joint"]]] = item["open"]
+                mujoco.mj_forward(model, scratch)
+
+                plan: dict[str, IKResult] = {}
+                ok = True
+                score = 0.0
+                rest = home_rest
+                for name, target in targets.items():
+                    if name in ("approach", "grasp"):
+                        pos_tol = 0.004
+                        ori_tol = GRASP_ORI_TOL
+                    elif name == "lift":
+                        pos_tol = 0.007
+                        ori_tol = LIFT_ORI_TOL
+                    else:
+                        pos_tol = 0.008
+                        ori_tol = PLACE_ORI_TOL
                     result = solve_oriented_target(
                         scratch, target, xmat, rest=rest,
-                        pos_tol=0.025, ori_tol=0.35,
+                        pos_tol=pos_tol,
+                        ori_tol=ori_tol,
                     )
-                    relaxed_lift = result.success
-                relaxed_place = False
-                if not result.success and name in ("carry_mid", "place_above", "place_drop"):
-                    result = solve_gripper_center_ik(
-                        model, scratch, target,
-                        pinch_body_id, pinch_body_id, arm_joints,
-                        max_iter=700, tol=0.008,
-                    )
-                    relaxed_place = result.success
-                plan[name] = result
-                score += result.error_norm * 100.0 + result.orientation_error_norm
-                if relaxed_lift:
-                    score += 0.5
-                if relaxed_place:
-                    score += 0.6
-                if not result.success:
-                    ok = False
-                    score += 20.0
-                    break
-                set_joint_positions(model, scratch, arm_joints, result.angles)
-                mujoco.mj_forward(model, scratch)
-                rest = result.angles
+                    relaxed_lift = False
+                    if not result.success and name == "lift":
+                        # The lift pose is a clearance waypoint.  Being a couple
+                        # of centimeters below the requested high clearance is
+                        # still safe and avoids rejecting otherwise good grasps.
+                        result = solve_oriented_target(
+                            scratch, target, xmat, rest=rest,
+                            pos_tol=0.025, ori_tol=0.35,
+                        )
+                        relaxed_lift = result.success
+                    relaxed_place = False
+                    if not result.success and name in ("carry_mid", "place_above", "place_drop"):
+                        result = solve_gripper_center_ik(
+                            model, scratch, target,
+                            pinch_body_id, pinch_body_id, arm_joints,
+                            max_iter=700, tol=0.008,
+                        )
+                        relaxed_place = result.success
+                    plan[name] = result
+                    score += result.error_norm * 100.0 + result.orientation_error_norm
+                    if relaxed_lift:
+                        score += 0.5
+                    if relaxed_place:
+                        score += 0.6
+                    if not result.success:
+                        ok = False
+                        score += 20.0
+                        break
+                    set_joint_positions(model, scratch, arm_joints, result.angles)
+                    mujoco.mj_forward(model, scratch)
+                    rest = result.angles
 
-            if ok:
-                score += 0.02 * float(np.linalg.norm(plan["grasp"].angles - home_rest))
-                score += grasp_stability_score(xmat, ball_xyz)
-                score += grasp_frame_penalty(xmat)
-                candidate_plans.append((score, plan, xmat.copy()))
-                if score < best_score:
+                if ok:
+                    score += 0.02 * float(np.linalg.norm(plan["grasp"].angles - home_rest))
+                    score += grasp_stability_score(xmat, ball_xyz)
+                    score += grasp_frame_penalty(xmat)
+                    candidate_plans.append(
+                        (score, plan, xmat.copy(), float(current_z_offs)))
+                    if score < best_score:
+                        best_score = score
+                        best_plan = plan
+                        best_xmat = xmat.copy()
+                        best_z_offs = float(current_z_offs)
+                elif best_plan is None and score < best_score:
                     best_score = score
                     best_plan = plan
-                    best_xmat = xmat.copy()
-            elif best_plan is None and score < best_score:
-                best_score = score
-                best_plan = plan
+                    best_z_offs = float(current_z_offs)
 
         preview_count = max(0, int(preview_top_k))
+        if grasp_z_offs is None and candidate_plans:
+            preview_count = len(candidate_plans)
         if candidate_plans and preview_count > 0:
             candidate_plans.sort(key=lambda item: item[0])
             preview_best_plan: dict[str, IKResult] | None = None
             preview_best_xmat: np.ndarray | None = None
             preview_best_score = float("inf")
-            for idx, (base_score, plan, xmat) in enumerate(
+            for idx, (base_score, plan, xmat, current_z_offs) in enumerate(
                     candidate_plans[:preview_count], start=1):
                 penalty = physical_plan_penalty(plan, ball_xyz, xmat)
                 total = base_score + penalty
@@ -2966,11 +3003,13 @@ def main() -> None:
                 print(f"    Physical preview {idx}: total={total:.2f} "
                       f"penalty={penalty:.2f} "
                       f"open={np.round(y_axis[:2], 2)} "
-                      f"approach={np.round(z_axis, 2)}")
+                      f"approach={np.round(z_axis, 2)} "
+                      f"z_off={current_z_offs*1000:.0f}mm")
                 if total < preview_best_score:
                     preview_best_score = total
                     preview_best_plan = plan
                     preview_best_xmat = xmat.copy()
+                    best_z_offs = float(current_z_offs)
             if preview_best_plan is not None:
                 best_plan = preview_best_plan
                 best_xmat = preview_best_xmat
@@ -2984,9 +3023,13 @@ def main() -> None:
             scratch.qpos[:] = data.qpos[:]
             scratch.qvel[:] = 0.0
             mujoco.mj_forward(model, scratch)
+            fallback_z_offs = float(z_offset_candidates[0])
+            grasp_contact_target = ball_xyz + np.array(
+                [0.0, 0.0, fallback_z_offs], dtype=np.float64)
             fallback_xmat = make_tool_xmat(
                 np.array([0.0, 0.0, -1.0], dtype=np.float64),
-                opening_hints[0] if opening_hints else _tangent_xy(_radial_xy(ball_xyz[:2])),
+                (_nearest_world_opening_axis(opening_hints[0])
+                 if opening_hints else _tangent_xy(_radial_xy(ball_xyz[:2]))),
             )
             fallback_grasp = gripper_body_target_for_contact(
                 grasp_contact_target, fallback_xmat)
@@ -3018,13 +3061,15 @@ def main() -> None:
                     set_joint_positions(model, scratch, arm_joints, result.angles)
                     mujoco.mj_forward(model, scratch)
             best_xmat = fallback_xmat.copy()
+            best_z_offs = fallback_z_offs
 
         if best_xmat is not None:
             dynamic_grasp_xmat = best_xmat.copy()
+            dynamic_grasp_z_offset = float(best_z_offs)
             print(f"    Selected grasp frame: "
                   f"open={np.round(best_xmat[:, 1], 2)} "
                   f"approach={np.round(best_xmat[:, 2], 2)} "
-                  f"grasp_z_offset={grasp_z_offs*1000:.0f}mm")
+                  f"grasp_z_offset={dynamic_grasp_z_offset*1000:.0f}mm")
         for name in ("approach", "grasp", "lift", "carry_mid", "place_above", "place_drop"):
             result = best_plan[name]
             status = "reachable" if result.success else "UNREACHABLE"
@@ -3113,6 +3158,7 @@ def main() -> None:
         nonlocal phase, sub, scan_idx, scan_targets, detected_ball_pos
         nonlocal detected_opening_hints, dynamic_ik_plan, regrasp_count, scan_round, status_msg
         nonlocal pregrasp_replan_count, local_replan_count, dynamic_grasp_xmat
+        nonlocal dynamic_grasp_z_offset
         nonlocal rgbd_scan_estimates, rgbd_scan_hints
         print(f"    Restarting search: {reason}")
         release_grip_lock("restart search")
@@ -3121,6 +3167,7 @@ def main() -> None:
         detected_opening_hints = []
         dynamic_ik_plan = {}
         dynamic_grasp_xmat = None
+        dynamic_grasp_z_offset = INITIAL_GRASP_Z_OFFSET
         rgbd_scan_estimates = []
         rgbd_scan_hints = []
         scan_targets = []
@@ -3244,9 +3291,9 @@ def main() -> None:
         nonlocal detected_ball_pos, detected_opening_hints
         nonlocal dynamic_ik_plan, status_msg, ball_z_before_lift
         nonlocal scan_round, box_verify_left, pregrasp_replan_count
-        nonlocal grip_contact_hold, grip_close_frames, local_replan_count
+        nonlocal grip_contact_hold, grip_close_frames, gripper_open_wait_frames, local_replan_count
         nonlocal prelift_lost_frames
-        nonlocal dynamic_grasp_xmat, rejected_grasp_frames
+        nonlocal dynamic_grasp_xmat, dynamic_grasp_z_offset, rejected_grasp_frames
         nonlocal rgbd_scan_estimates, rgbd_scan_hints
         nonlocal last_scan_rgbd_sample_frame
 
@@ -3389,12 +3436,21 @@ def main() -> None:
                     return
                 print(">>> Phase 2 : Open gripper before approach")
                 gripper_ctrl.open(duration_frames=55)
+                gripper_open_wait_frames = 0
                 sub = 10
                 status_msg = "Opening gripper before approach ..."
                 return
             if sub == 10:
-                if not gripper_ctrl.done or not gripper_is_open():
+                gripper_open_wait_frames += 1
+                if not gripper_ctrl.done:
                     return
+                if not gripper_is_open():
+                    open_err = gripper_open_error()
+                    if gripper_open_wait_frames < GRIPPER_OPEN_WAIT_FRAMES:
+                        return
+                    print(f"    Gripper open wait timeout; continuing with "
+                          f"open_err={open_err:.4f}rad "
+                          f"(tol={GRIPPER_OPEN_TOL:.4f}rad)")
                 print(">>> Phase 2 : Approach")
                 arm_ctrl.set_target(dynamic_ik_plan["approach"].angles, speed=SPEED_NORMAL)
                 sub = 1
@@ -3540,8 +3596,10 @@ def main() -> None:
                 # Align the real jaw center with the cube center.  Retries
                 # sample slightly different heights instead of driving below
                 # the cube, which caused table/box scraping and side misses.
-                z_offs = GRASP_Z_OFFSETS[
-                    min(regrasp_count, len(GRASP_Z_OFFSETS) - 1)]
+                z_offs = (
+                    dynamic_grasp_z_offset if regrasp_count == 0 else
+                    GRASP_Z_OFFSETS[min(regrasp_count, len(GRASP_Z_OFFSETS) - 1)]
+                )
                 print(f">>> Phase 3 : Descend  (grasp Z offset = {z_offs*1000:.0f} mm)")
                 # The scan/pre-grasp step already ran the expensive physical
                 # preview.  Reuse that plan for the first descent so the robot
@@ -3602,8 +3660,6 @@ def main() -> None:
                     diagnose_failure("bad pre-close contact before close")
                     begin_local_rgbd_replan("bad pre-close contact before close")
                     return
-                z_offs = GRASP_Z_OFFSETS[
-                    min(regrasp_count, len(GRASP_Z_OFFSETS) - 1)]
                 if not pre_close_alignment_ok("Pre-close alignment"):
                     if not arm_ctrl.done:
                         status_msg = "Finishing descent before final alignment check ..."
@@ -3896,6 +3952,7 @@ def main() -> None:
                 release_cube_static_anchor("release in box")
                 release_grip_lock("release in box")
                 dynamic_grasp_xmat = None
+                dynamic_grasp_z_offset = INITIAL_GRASP_Z_OFFSET
                 gripper_ctrl.open(duration_frames=25)
                 sub = 1
                 status_msg = "Releasing ..."
@@ -4030,6 +4087,7 @@ def main() -> None:
                     pregrasp_replan_count = 0
                     local_replan_count = 0
                     dynamic_grasp_xmat = None
+                    dynamic_grasp_z_offset = INITIAL_GRASP_Z_OFFSET
                     rejected_grasp_frames = []
                 phase = 0; sub = 0
                 status_msg = "Starting cube search ..."
