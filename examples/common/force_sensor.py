@@ -1,4 +1,4 @@
-"""Six-axis force/torque sensor reading and real-time display."""
+"""Force/torque and tactile skin sensor utilities."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -18,6 +18,22 @@ class FTReading:
     force: np.ndarray
     torque: np.ndarray
     timestamp: float
+
+
+@dataclass
+class TactileReading:
+    left_force: float
+    right_force: float
+    timestamp: float
+
+    @property
+    def total_force(self) -> float:
+        return self.left_force + self.right_force
+
+    @property
+    def balance(self) -> float:
+        total = max(self.total_force, 1e-9)
+        return abs(self.left_force - self.right_force) / total
 
 
 class ForceTorqueSensor:
@@ -149,3 +165,142 @@ class FTDisplay:
     def close(self) -> None:
         if CV2_AVAILABLE:
             cv2.destroyWindow("Force/Torque Sensor")
+
+
+class TactileSkinSensor:
+    """Reads left/right inner gripper touch sensors as electronic skin."""
+
+    def __init__(self, model, left_name: str = "left_inner_skin_touch",
+                 right_name: str = "right_inner_skin_touch",
+                 filter_alpha: float = 0.35):
+        self.left_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SENSOR, left_name)
+        self.right_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SENSOR, right_name)
+        if self.left_id < 0 or self.right_id < 0:
+            raise RuntimeError(
+                f"Tactile sensors '{left_name}'/'{right_name}' not found in model."
+            )
+        self.left_adr = int(model.sensor_adr[self.left_id])
+        self.right_adr = int(model.sensor_adr[self.right_id])
+        self.left_dim = int(model.sensor_dim[self.left_id])
+        self.right_dim = int(model.sensor_dim[self.right_id])
+        self.filter_alpha = float(np.clip(filter_alpha, 0.0, 1.0))
+        self._left_filtered: float | None = None
+        self._right_filtered: float | None = None
+
+    @staticmethod
+    def _force_from_sensor(data, adr: int, dim: int) -> float:
+        raw = data.sensordata[adr:adr + dim].astype(np.float64, copy=True)
+        if raw.size == 0:
+            return 0.0
+        if raw.size == 1:
+            return max(0.0, float(raw[0]))
+        return float(np.linalg.norm(raw))
+
+    def read(self, data) -> TactileReading:
+        left_raw = self._force_from_sensor(data, self.left_adr, self.left_dim)
+        right_raw = self._force_from_sensor(data, self.right_adr, self.right_dim)
+        if self._left_filtered is None:
+            self._left_filtered = left_raw
+            self._right_filtered = right_raw
+        else:
+            a = self.filter_alpha
+            self._left_filtered += a * (left_raw - self._left_filtered)
+            self._right_filtered += a * (right_raw - self._right_filtered)
+        return TactileReading(
+            left_force=float(self._left_filtered),
+            right_force=float(self._right_filtered),
+            timestamp=float(data.time),
+        )
+
+
+class TactileSkinDisplay:
+    """Real-time scrolling plot for left/right inner gripper skin force."""
+
+    COLORS = [(0, 220, 255), (255, 180, 0)]  # left/right, BGR
+
+    def __init__(self, width: int = 500, height: int = 260,
+                 history_len: int = 180):
+        if not CV2_AVAILABLE:
+            raise RuntimeError("OpenCV is required for TactileSkinDisplay.")
+        self.width = width
+        self.height = height
+        self.history_len = history_len
+        self.canvas = np.zeros((height, width, 3), dtype=np.uint8)
+        self.history = np.zeros((history_len, 2), dtype=np.float64)
+        self.write_idx = 0
+        self.filled = False
+        self.force_scale = 1.0
+
+        cv2.namedWindow("Gripper Tactile Skin", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("Gripper Tactile Skin", width, height)
+
+    def update(self, reading: TactileReading) -> None:
+        self.history[self.write_idx] = [reading.left_force, reading.right_force]
+        self.write_idx = (self.write_idx + 1) % self.history_len
+        if self.write_idx == 0:
+            self.filled = True
+        self.force_scale = max(np.max(np.abs(self.history)) + 0.05, 0.5)
+
+    def show(self) -> None:
+        self.canvas[:] = 20
+        text_h = 64
+        plot_h = self.height - text_h - 8
+        n = self.history_len if self.filled else self.write_idx
+        if n < 2:
+            cv2.imshow("Gripper Tactile Skin", self.canvas)
+            return
+
+        indices = np.arange(n)
+        ordered = (
+            indices + (self.write_idx if self.filled else 0)
+        ) % (self.history_len if self.filled else n)
+        data = self.history[ordered] if self.filled else self.history[:n]
+        self._draw_text(data[-1])
+        self._draw_plot(data, text_h, plot_h)
+        cv2.imshow("Gripper Tactile Skin", self.canvas)
+
+    def _draw_text(self, latest: np.ndarray) -> None:
+        left, right = float(latest[0]), float(latest[1])
+        total = left + right
+        balance = abs(left - right) / max(total, 1e-9)
+        labels = [
+            f"L skin:{left:.2f}N",
+            f"R skin:{right:.2f}N",
+            f"sum:{total:.2f}N",
+            f"bal:{balance:.2f}",
+        ]
+        colors = [self.COLORS[0], self.COLORS[1], (220, 220, 220), (160, 220, 160)]
+        for idx, (label, color) in enumerate(zip(labels, colors)):
+            x = 10 + (idx % 2) * 230
+            y = 22 if idx < 2 else 46
+            cv2.putText(
+                self.canvas, label, (x, y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.48, color, 1, cv2.LINE_AA,
+            )
+
+    def _draw_plot(self, data: np.ndarray, y_offset: int, plot_h: int) -> None:
+        w = self.width
+        n = len(data)
+        bottom = y_offset + plot_h - 6
+        top = y_offset + 8
+        cv2.line(self.canvas, (0, bottom), (w, bottom), (60, 60, 60), 1)
+        cv2.putText(
+            self.canvas, f"+{self.force_scale:.1f}N", (w - 72, top + 12),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.35, (130, 130, 130), 1,
+        )
+        for ch in range(2):
+            pts = []
+            for i in range(n):
+                x = int(i * (w - 1) / max(n - 1, 1))
+                val = np.clip(data[i, ch] / self.force_scale, 0.0, 1.0)
+                y = int(bottom - val * (bottom - top))
+                pts.append((x, y))
+            if len(pts) > 1:
+                cv2.polylines(
+                    self.canvas, [np.array(pts, dtype=np.int32)],
+                    False, self.COLORS[ch], 1, cv2.LINE_AA,
+                )
+
+    def close(self) -> None:
+        if CV2_AVAILABLE:
+            cv2.destroyWindow("Gripper Tactile Skin")
