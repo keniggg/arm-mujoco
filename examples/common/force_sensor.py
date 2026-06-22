@@ -172,7 +172,11 @@ class TactileSkinSensor:
 
     def __init__(self, model, left_name: str = "left_inner_skin_touch",
                  right_name: str = "right_inner_skin_touch",
-                 filter_alpha: float = 0.35):
+                 filter_alpha: float = 0.8,
+                 force_min: float = 0.0,
+                 force_max: float = 20.0,
+                 resolution: float = 0.1,
+                 recognition_threshold: float = 0.1):
         self.left_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SENSOR, left_name)
         self.right_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SENSOR, right_name)
         if self.left_id < 0 or self.right_id < 0:
@@ -184,6 +188,10 @@ class TactileSkinSensor:
         self.left_dim = int(model.sensor_dim[self.left_id])
         self.right_dim = int(model.sensor_dim[self.right_id])
         self.filter_alpha = float(np.clip(filter_alpha, 0.0, 1.0))
+        self.force_min = float(force_min)
+        self.force_max = max(float(force_max), self.force_min)
+        self.resolution = max(0.0, float(resolution))
+        self.recognition_threshold = max(0.0, float(recognition_threshold))
         self._left_filtered: float | None = None
         self._right_filtered: float | None = None
 
@@ -196,9 +204,21 @@ class TactileSkinSensor:
             return max(0.0, float(raw[0]))
         return float(np.linalg.norm(raw))
 
+    def _apply_specs(self, force: float) -> float:
+        force = float(np.clip(force, self.force_min, self.force_max))
+        if force < self.recognition_threshold:
+            return 0.0
+        if self.resolution > 0.0:
+            force = round(force / self.resolution) * self.resolution
+        return float(np.clip(force, self.force_min, self.force_max))
+
     def read(self, data) -> TactileReading:
-        left_raw = self._force_from_sensor(data, self.left_adr, self.left_dim)
-        right_raw = self._force_from_sensor(data, self.right_adr, self.right_dim)
+        left_raw = self._apply_specs(
+            self._force_from_sensor(data, self.left_adr, self.left_dim)
+        )
+        right_raw = self._apply_specs(
+            self._force_from_sensor(data, self.right_adr, self.right_dim)
+        )
         if self._left_filtered is None:
             self._left_filtered = left_raw
             self._right_filtered = right_raw
@@ -207,8 +227,8 @@ class TactileSkinSensor:
             self._left_filtered += a * (left_raw - self._left_filtered)
             self._right_filtered += a * (right_raw - self._right_filtered)
         return TactileReading(
-            left_force=float(self._left_filtered),
-            right_force=float(self._right_filtered),
+            left_force=self._apply_specs(float(self._left_filtered)),
+            right_force=self._apply_specs(float(self._right_filtered)),
             timestamp=float(data.time),
         )
 

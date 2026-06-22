@@ -17,6 +17,36 @@ BALL_POS = np.array([0.30, 0.00, 0.05], dtype=np.float64)
 BALL_RADIUS = 0.025
 
 RGB_CAMERA_NAME = "wrist_rgb"
+WRIST_CAMERA_LOCAL_POS = np.array([0.090, 0.0, 0.092], dtype=np.float64)
+WRIST_CAMERA_LOOK_AT_LOCAL = np.array([0.0002, 0.0, 0.13098], dtype=np.float64)
+WRIST_CAMERA_LOCAL_Z = float(WRIST_CAMERA_LOCAL_POS[2])
+
+
+def _unit(vec: np.ndarray, fallback: np.ndarray) -> np.ndarray:
+    norm = float(np.linalg.norm(vec))
+    if norm < 1e-9:
+        return fallback.copy()
+    return np.asarray(vec, dtype=np.float64) / norm
+
+
+WRIST_CAMERA_FORWARD_LOCAL = _unit(
+    WRIST_CAMERA_LOOK_AT_LOCAL - WRIST_CAMERA_LOCAL_POS,
+    np.array([0.0, 0.0, 1.0], dtype=np.float64),
+)
+_WRIST_CAMERA_Z_AXIS = -WRIST_CAMERA_FORWARD_LOCAL
+_WRIST_CAMERA_X_AXIS = np.array([0.0, -1.0, 0.0], dtype=np.float64)
+_WRIST_CAMERA_X_AXIS = _unit(
+    _WRIST_CAMERA_X_AXIS -
+    np.dot(_WRIST_CAMERA_X_AXIS, _WRIST_CAMERA_Z_AXIS) * _WRIST_CAMERA_Z_AXIS,
+    np.array([0.0, -1.0, 0.0], dtype=np.float64),
+)
+_WRIST_CAMERA_Y_AXIS = _unit(
+    np.cross(_WRIST_CAMERA_Z_AXIS, _WRIST_CAMERA_X_AXIS),
+    np.array([0.0, 0.0, -1.0], dtype=np.float64),
+)
+WRIST_CAMERA_XYAXES = np.concatenate(
+    (_WRIST_CAMERA_X_AXIS, _WRIST_CAMERA_Y_AXIS)
+)
 
 
 def _first_tag_end(xml_content: str, tag_name: str) -> int:
@@ -72,9 +102,11 @@ def inject_soft_ball(xml_content: str, pos: np.ndarray = None, radius: float = N
 
 def inject_wrist_camera(xml_content: str) -> str:
     if f'name="{RGB_CAMERA_NAME}"' not in xml_content:
+        pos = " ".join(f"{v:.5f}" for v in WRIST_CAMERA_LOCAL_POS)
+        xyaxes = " ".join(f"{v:.6f}" for v in WRIST_CAMERA_XYAXES)
         wrist_camera_xml = (
-            f'                  <camera name="{RGB_CAMERA_NAME}" pos="0 0 0.085" '
-            'xyaxes="1 0 0 0 -1 0" fovy="65"/>\n'
+            f'                  <camera name="{RGB_CAMERA_NAME}" pos="{pos}" '
+            f'xyaxes="{xyaxes}" fovy="58"/>\n'
         )
         marker = '<geom size="0.005" pos="-0.0002 -0.0003 0.13118"'
         marker_pos = xml_content.find(marker)

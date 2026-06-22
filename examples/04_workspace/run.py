@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Interactive grasping demo 鈥?drag the cube, press SPACE, watch the arm find & fetch it.
 
 Features:
@@ -44,7 +44,10 @@ try:
 except ImportError:
     CV2_AVAILABLE = False
 
-from common.model_loader import RGB_CAMERA_NAME, BALL_POS
+from common.model_loader import (
+    RGB_CAMERA_NAME, BALL_POS,
+    WRIST_CAMERA_LOCAL_POS, WRIST_CAMERA_FORWARD_LOCAL,
+)
 from common.ik_solver import (
     solve_gripper_center_ik, set_joint_positions, IKResult,
 )
@@ -60,17 +63,31 @@ PHYSICS_SUBSTEPS = 5
 FRAME_DT = 1.0 / TARGET_DISPLAY_HZ
 START_TRIGGER_THRESHOLD = 0.95
 
-SKIN_EVERY_N = 2       # 25 Hz
+D405C_DEPTH_WIDTH = 640
+D405C_DEPTH_HEIGHT = 360
+D405C_DEPTH_FPS = 90
+D405C_RGB_WIDTH = 1280
+D405C_RGB_HEIGHT = 720
+D405C_RGB_FPS = 90
+D405C_DEPTH_FOVX_DEG = 87.0
+D405C_DEPTH_FOVY_DEG = 58.0
+D405C_MIN_RANGE_M = 0.07
+D405C_MAX_RANGE_M = 0.50
+D405C_MIN_TARGET_M = 0.001
+D405C_DEPTH_ACCURACY_AT_50CM = 0.02
+
+SKIN_EVERY_N = 1       # 50 Hz loop; sensor response spec is <=25 ms.
 JOINT_EVERY_N = 4      # 12.5 Hz
-CAMERA_EVERY_N = 2     # 25 Hz
-SCAN_RGBD_CAPTURE_EVERY_N = 4  # Opportunistic scan detection while moving.
+CAMERA_EVERY_N = 1     # D405C supports 90 Hz; this sim loop is capped at 50 Hz.
+SCAN_RGBD_CAPTURE_EVERY_N = 1  # Opportunistic scan detection while moving.
+SCAN_MOVING_CAPTURE_PROGRESS = 0.58
 
 SPEED_NORMAL = 1.4
 SPEED_SLOW = 0.55  # very slow for precise grasp positioning
-SPEED_SCAN = 1.0
-SPEED_LIFT = 0.12
-SPEED_CARRY = 0.12
-SPEED_PLACE = 0.32
+SPEED_SCAN = 1.25
+SPEED_LIFT = 0.32
+SPEED_CARRY = 0.30
+SPEED_PLACE = 0.72
 SPEED_LOCAL_REPLAN = 1.15
 
 WORKSPACE_MAX_SPHERES = 250
@@ -92,22 +109,56 @@ RED_LOWER_2 = (158, 60, 50)
 RED_UPPER_2 = (180, 255, 255)
 RGB_RED_DOMINANCE_MIN = 18
 RGB_RED_RATIO_MIN = 1.12
+BOX_BLUE_HSV_LOWER = (90, 45, 45)
+BOX_BLUE_HSV_UPPER = (125, 255, 255)
+BOX_BLUE_MIN = 85
+BOX_BLUE_RED_MARGIN = 35
+BOX_GREEN_RED_MARGIN = 15
+BOX_BLUE_GREEN_MARGIN = -10
+MIN_BOX_AREA_PX = 80
+MIN_BOX_DEPTH_SAMPLES = 30
+BOX_ESTIMATE_MAX_VIEWS = 5
+BOX_ESTIMATE_STABILITY_M = 0.018
+BOX_ACCEPT_MIN_AREA_PX = 5000
+BOX_ACCEPT_MIN_XY_EXTENT_M = 0.120
+BOX_ACCEPT_MIN_Z_EXTENT_M = 0.055
+BOX_STRONG_SINGLE_VIEW_AREA_PX = 80000
+BOX_STRONG_SINGLE_VIEW_MIN_XY_EXTENT_M = 0.125
+BOX_STRONG_SINGLE_VIEW_MIN_Z_EXTENT_M = 0.060
+BOX_DETECTION_Z_MIN = 0.014
+BOX_DETECTION_Z_MAX = 0.160
+BOX_FOOTPRINT_FULL_EXTENT_RATIO = 0.78
+BOX_FOOTPRINT_VALID_MARGIN = 0.018
+BOX_HINT_MAX_DEVIATION_M = 0.030
 
 MIN_BALL_AREA_PX = 12       # minimum contour area (small cube at distance 鈮?15-30 px)
 CUBE_HALF_SIZE = 0.020  # 40 mm cube side 鈥?good grip depth in 50 mm gripper
 PAD_HALF_HEIGHT = 0.003
 CUBE_REST_Z = CUBE_HALF_SIZE + PAD_HALF_HEIGHT
-CAMERA_TO_GRIPPER_CENTER = 0.046
+CAMERA_LOCAL_OFFSET_FROM_PINCH = (
+    np.asarray(WRIST_CAMERA_LOCAL_POS, dtype=np.float64) -
+    np.asarray(PINCH_CENTER_LOCAL_POS, dtype=np.float64)
+)
+CAMERA_TO_GRIPPER_CENTER = float(np.linalg.norm(CAMERA_LOCAL_OFFSET_FROM_PINCH))
+CAMERA_FORWARD_LOCAL = np.asarray(WRIST_CAMERA_FORWARD_LOCAL, dtype=np.float64)
 SCAN_CAMERA_DISTANCE = 0.24
 MIN_DEPTH_SAMPLES = 8
-MAX_RGBD_DEPTH_M = 2.0
+MIN_RGBD_DEPTH_M = D405C_MIN_RANGE_M
+MAX_RGBD_DEPTH_M = D405C_MAX_RANGE_M
 VISION_Z_MIN = -0.03
 VISION_Z_MAX = 0.45
 GRASP_ORI_WEIGHT = 0.36
 GRASP_ORI_TOL = 0.08
 LIFT_ORI_TOL = 0.12
 PLACE_ORI_TOL = 0.22
-GRASP_WORLD_AXIS_WEIGHT = 14.0
+APPROACH_IK_POS_TOL = 0.010
+GRASP_IK_POS_TOL = 0.005
+GRASP_WORLD_AXIS_WEIGHT = 180.0
+GRASP_TRANSPORT_AXIS_WEIGHT = 18.0
+GRASP_TRANSPORT_TARGET_ALIGNMENT = 0.55
+GRASP_OPENING_HINT_WEIGHT = 220.0
+GRASP_OPENING_HINT_ALIGNMENT = 0.95
+GRASP_DIAGONAL_OPENING_WEIGHT = 700.0
 RGBD_MAX_ESTIMATE_SPREAD_M = 0.055
 RGBD_MAX_PLANE_RESIDUAL_M = 0.010
 RGBD_MIN_PLANE_INLIERS = 35
@@ -115,71 +166,140 @@ GLOBAL_RGBD_MIN_VIEWS = 2
 GLOBAL_RGBD_MAX_VIEWS = 5
 GLOBAL_RGBD_STABILITY_M = 0.015
 GLOBAL_RGBD_STRONG_SINGLE_VIEW_INLIERS = 80
-GLOBAL_RGBD_STRONG_SINGLE_VIEW_RESIDUAL_M = 0.006
-GLOBAL_RGBD_STRONG_SINGLE_VIEW_SPREAD_M = 0.035
+GLOBAL_RGBD_STRONG_SINGLE_VIEW_RESIDUAL_M = 0.0025
+GLOBAL_RGBD_STRONG_SINGLE_VIEW_SPREAD_M = 0.012
+RGBD_ANCHORED_CUBE_MAX_ERR_M = 0.035
+PREGRASP_ANCHORED_CUBE_MAX_ERR_M = 0.025
 GRIP_CONTACT_FORCE = 9.0
 GRIP_CONFIRM_FORCE = 5.8
 GRIP_LOCK_MIN_FORCE = 1.5
-GRIP_MAX_FORCE = 80.0
-SKIN_TOUCH_FORCE = 0.03
+GRIP_MAX_FORCE = 115.0
+GRIP_ACTUATOR_RELAX_DEADBAND = 3.0
+GRIP_OVERFORCE_RELAX_CORRECTION = 0.00008
+SKIN_FORCE_MIN_RECOGNITION_N = 0.1
+SKIN_FORCE_RANGE_MIN_N = 0.0
+SKIN_FORCE_RANGE_MAX_N = 20.0
+SKIN_FORCE_RESOLUTION_N = 0.1
+SKIN_RESPONSE_TIME_S = 0.025
+SKIN_FILTER_ALPHA = 0.8
+SKIN_SENSOR_SPACING_MIN_M = 0.0002
+SKIN_OVERLOAD_MULTIPLIER = 2.5
+SKIN_SUPPLY_VOLTAGE_V = 5.0
+SKIN_COMM_PROTOCOL = "RS485"
+SKIN_TOUCH_FORCE = SKIN_FORCE_MIN_RECOGNITION_N
 SKIN_CONFIRM_FORCE = 5.0
-SKIN_HOLD_MIN_FORCE = 6.0
-SKIN_HOLD_TARGET_FORCE = 10.0
-SKIN_HOLD_MAX_FORCE = 24.0
+SKIN_HOLD_MIN_FORCE = 16.0
+SKIN_HOLD_TARGET_FORCE = 18.0
+SKIN_HOLD_MAX_FORCE = 20.0
+SKIN_PRELIFT_READY_FORCE = 16.0
 SKIN_BALANCE_MAX_RATIO = 0.80
-VISUAL_GRIP_CAPTURE_EVERY_N = 8
-VISUAL_GRIP_LOG_EVERY_N = 35
-VISUAL_GRIP_FILTER_ALPHA = 0.35
-VISUAL_GRIP_ERR_SOFT_M = 0.007
-VISUAL_GRIP_ERR_HARD_M = 0.026
-VISUAL_GRIP_DROP_SOFT_M = 0.004
-VISUAL_GRIP_DROP_HARD_M = 0.018
-VISUAL_GRIP_RATE_SOFT_MPS = 0.006
-VISUAL_GRIP_RATE_HARD_MPS = 0.035
-VISUAL_GRIP_MIN_FORCE_BOOST = 4.0
+TACTILE_SECURE_OVERRIDE_MIN_FORCE = 6.0
+TACTILE_SECURE_LOG_EVERY_N = 30
+VISUAL_GRIP_CAPTURE_EVERY_N = 4
+VISUAL_GRIP_LOG_EVERY_N = 18
+VISUAL_GRIP_FILTER_ALPHA = 0.55
+VISUAL_GRIP_ERR_SOFT_M = 0.004
+VISUAL_GRIP_ERR_HARD_M = 0.016
+VISUAL_GRIP_DROP_SOFT_M = 0.0025
+VISUAL_GRIP_DROP_HARD_M = 0.0095
+VISUAL_GRIP_RATE_SOFT_MPS = 0.003
+VISUAL_GRIP_RATE_HARD_MPS = 0.020
+VISUAL_GRIP_MAX_REL_XY_M = 0.028
+VISUAL_GRIP_MAX_REL_Z_M = 0.026
+VISUAL_GRIP_MIN_FORCE_BOOST = 6.0
 VISUAL_GRIP_TARGET_FORCE_BOOST = 8.0
-VISUAL_GRIP_MAX_FORCE_BOOST = 8.0
-VISUAL_GRIP_POSITION_CORRECTION_GAIN = 0.040
-VISUAL_GRIP_POSITION_CORRECTION_MAX = 0.0012
-GRIP_HOLD_PRELOAD = 0.0180
-GRIP_HOLD_CORRECTION = 0.00025
-GRIP_HOLD_FAST_CORRECTION = 0.00070
-GRIP_HOLD_RELAX_CORRECTION = 0.00004
+VISUAL_GRIP_MAX_FORCE_BOOST = 2.0
+VISUAL_GRIP_POSITION_CORRECTION_GAIN = 0.095
+VISUAL_GRIP_POSITION_CORRECTION_MAX = 0.0035
+VISUAL_GRIP_EMERGENCY_DROP_M = 0.0070
+VISUAL_GRIP_EMERGENCY_SLIP_M = 0.0110
+VISUAL_GRIP_EMERGENCY_CORRECTION = 0.0028
+VISUAL_TRANSPORT_ABORT_SLIP_M = 0.026
+VISUAL_TRANSPORT_ABORT_DROP_M = 0.016
+VISUAL_TRANSPORT_SEVERE_SLIP_M = 0.038
+VISUAL_TRANSPORT_SEVERE_DROP_M = 0.028
+VISUAL_TRANSPORT_ABORT_FRAMES = 3
+GRIP_HOLD_PRELOAD = 0.0240
+GRIP_HOLD_CORRECTION = 0.00165
+GRIP_HOLD_FAST_CORRECTION = 0.00450
+GRIP_HOLD_RELAX_CORRECTION = 0.000025
 GRIP_FORCE_DEADBAND = 1.1
-GRIP_CLOSE_FRAMES = 300
-GRIP_CONTACT_HOLD_FRAMES = 10
-GRIP_CLOSE_TIMEOUT_FRAMES = GRIP_CLOSE_FRAMES + 100
-GRIP_HOLD_FRAMES = 260
-GRIP_TRANSPORT_HOLD_FRAMES = 6000
-GRASP_LIFT_HEIGHT = 0.20
-PLACE_ABOVE_HEIGHT = 0.24
+GRIP_CLOSE_FRAMES = 220
+GRIP_CONTACT_HOLD_FRAMES = 7
+GRIP_CLOSE_TIMEOUT_FRAMES = GRIP_CLOSE_FRAMES + 70
+GRIP_HOLD_FRAMES = 150
+GRIP_PRELIFT_MIN_FRAMES = 28
+GRIP_PRELIFT_READY_FRAMES = 8
+GRIP_TRANSPORT_HOLD_FRAMES = 12000
+LIFT_MIN_FRAMES = 125
+CARRY_MID_MIN_FRAMES = 70
+PLACE_ABOVE_MIN_FRAMES = 130
+PLACE_DROP_MIN_FRAMES = 80
+GRASP_LIFT_HEIGHT = 0.052
+PLACE_ABOVE_HEIGHT = 0.062
+CARRY_CRUISE_HEIGHT = 0.030
+CARRY_FINAL_RAISE_XY_M = 0.055
+CARRY_STEP_MAX_XY_M = 0.034
+CARRY_HIGH_STEP_MAX_XY_M = 0.060
+CARRY_STEP_FINAL_DIRECT_XY_M = 0.120
+CARRY_STEP_MIN_FRAMES = 70
+TRANSPORT_STALL_PROGRESS_EPS_M = 0.006
+TRANSPORT_STALL_MAX_STEPS = 3
+PLACE_DIRECT_DROP_XY_MARGIN_M = 0.008
+BOX_ENTRY_TARGET_FRACTION = 0.72
+BOX_ENTRY_CENTER_BLEND = 0.40
+TRANSPORT_REGRIP_MAX_COUNT = 3
+TRANSPORT_REGRIP_MAX_ERR = 0.018
+TRANSPORT_REGRIP_MAX_SPEED = 0.140
+TRANSPORT_REGRIP_STABLE_SPEED = 0.050
+TRANSPORT_REGRIP_FRAMES = 140
+TRANSPORT_REGRIP_STABLE_FRAMES = 18
+PLACE_RELEASE_CLEARANCE = -0.0008
+PLACE_RELEASE_XY_MARGIN = 0.014
+PLACE_RELEASE_Z_TOL = 0.003
+PLACE_SETTLE_HOLD_FRAMES = 45
+PLACE_RELEASE_OPEN_FRAMES = 95
+MAX_PLACE_CORRECTIONS = 2
+PLACE_REQUIRE_BOX_BOTTOM_CONTACT = True
+PLACE_HELD_RECOVERY_MAX_ERR = 0.060
+PLACE_HELD_RECOVERY_MIN_LIFT = 0.008
+PLACE_RESCAN_RETURN_MIN_FRAMES = 90
+MAX_PLACE_SUPPORT_RESCANS = 1
 GRASP_TARGET_FACE_BIAS = 0.000
 GRASP_TARGET_APPROACH_BIAS = 0.000
-CARRY_MIN_LIFT = 0.018
-CARRY_MAX_ERR = 0.035
+CARRY_MIN_LIFT = 0.012
+CARRY_MAX_ERR = 0.028
+TACTILE_SECURE_OVERRIDE_MAX_ERR = CARRY_MAX_ERR * 1.35
 GRIP_LOCK_MAX_ERR = 0.024
 GRIP_LOCK_MAX_OPEN_AXIS_ERR = CUBE_HALF_SIZE * 0.65
 GRIP_LOCK_MAX_FACE_AXIS_ERR = CUBE_HALF_SIZE * 0.75
-GRIP_LOCK_MAX_APPROACH_AXIS_ERR = CUBE_HALF_SIZE * 0.90
+GRIP_LOCK_MAX_APPROACH_AXIS_ERR = CUBE_HALF_SIZE * 0.62
+GRIP_STICTION_MAX_ERR = 0.030
+GRIP_STICTION_STEP_M = 0.0024
+GRIP_STICTION_GAIN = 0.45
 CONTACT_CONFIRM_MAX_DIST = 0.0008
 MIN_STABLE_FINGER_CONTACTS = 2
 TARGET_FINGER_CONTACTS = 4
-MIN_CONTACT_DIVERSITY = 0.012
+MIN_CONTACT_DIVERSITY = 0.008
 MAX_CONTACT_PAIR_SKEW = 0.034
 MAX_CONTACT_CENTER_ERR = 0.026
-INITIAL_GRASP_Z_OFFSET = 0.000
+PREFERRED_CONTACT_CENTER_ERR = 0.010
+PREFERRED_CONTACT_PAIR_SKEW = 0.018
+PREFERRED_GRASP_Z_OFFSET = -0.004
+GRASP_HEIGHT_SCORE_WEIGHT = 240.0
+GRASP_APPROACH_ERR_SCORE_WEIGHT = 90.0
+INITIAL_GRASP_Z_OFFSET = PREFERRED_GRASP_Z_OFFSET
 GRASP_Z_OFFSETS = [
+    -0.006,
     INITIAL_GRASP_Z_OFFSET,
-    0.004,
-    0.008,
-    0.012,
-    0.016,
+    -0.002,
 ]
 PRE_CLOSE_MAX_XY_ERR = 0.010
-PRE_CLOSE_MAX_Z_ERR = 0.018
+PRE_CLOSE_MAX_Z_ERR = 0.014
 PRE_CLOSE_MAX_OPEN_AXIS_ERR = CUBE_HALF_SIZE * 0.45
 PRE_CLOSE_MAX_FACE_AXIS_ERR = CUBE_HALF_SIZE * 0.70
 PRE_CLOSE_MAX_CENTER_ERR = 0.022
+PRE_CLOSE_MAX_ORI_ERR = 0.14
 EARLY_CONTACT_MAX_PENETRATION = 0.0018
 MAX_LOCAL_REPLAN = 2
 PHYSICAL_EVAL_TOP_K = 24
@@ -187,21 +307,36 @@ LOCAL_PHYSICAL_EVAL_TOP_K = 6
 REJECTED_GRASP_FRAME_PENALTY = 45.0
 VISION_REPLAN_DELTA = 0.018
 LOCAL_RGBD_KEEP_PLAN_DELTA = 0.008
-MAX_PREGRASP_REPLANS = 1
+MAX_PREGRASP_REPLANS = 2
 PREGRASP_REAPPROACH_TOL = 0.020
 GRIPPER_OPEN_TOL = 0.0045
 GRIPPER_OPEN_WAIT_FRAMES = 90
 APPROACH_CAPTURE_PROGRESS = 0.88
 DESCEND_CLOSE_PROGRESS = 0.92
-LOCAL_RETRACT_MIN_FRAMES = 80
-LOCAL_REAPPROACH_MIN_FRAMES = 70
+PRE_CLOSE_STABLE_FRAMES = 6
+DESCEND_MID_CLEARANCE = 0.055
+DESCEND_MID_MIN_FRAMES = 65
+LOCAL_RETRACT_MIN_FRAMES = 55
+LOCAL_REAPPROACH_MIN_FRAMES = 50
 ARM_DONE_QPOS_TOL = 0.018
 ARM_DONE_QVEL_TOL = 0.08
-PRELIFT_LOST_GRACE_FRAMES = 18
+ARM_DONE_MAX_SETTLE_FRAMES = 45
+PRELIFT_LOST_GRACE_FRAMES = 30
 CUBE_IDLE_FREEZE_SPEED = 0.010
 CUBE_IDLE_FREEZE_ANG_SPEED = 0.050
 CUBE_REST_Z_TOL = 0.006
-BOX_VERIFY_FRAMES = 80
+CUBE_PRECONTACT_REST_Z_TOL = 0.012
+CUBE_STATIC_ANCHOR_MAX_Z = CUBE_REST_Z + 0.045
+BOX_VERIFY_FRAMES = 45
+HELD_BOX_SCAN_Z_PLANE = CUBE_REST_Z + 0.070
+HELD_BOX_SCAN_MIN_CUBE_Z = CUBE_REST_Z + 0.105
+HIGH_CUBE_RECOVERY_OPEN_FRAMES = 45
+HIGH_CUBE_SETTLE_SPEED = 0.035
+HIGH_CUBE_SETTLE_ANG_SPEED = 0.12
+HIGH_CUBE_SETTLE_FRAMES = 8
+HIGH_CUBE_SETTLE_TIMEOUT_FRAMES = 220
+REQUIRE_BOX_BEFORE_GRASP = True
+ALLOW_PARTIAL_BOX_HINT_PLACEMENT = False
 
 # 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 # XML injection 鈥?target box
@@ -209,6 +344,8 @@ BOX_VERIFY_FRAMES = 80
 BOX_POS = np.array([0.42, -0.15, 0.06], dtype=np.float64)
 BOX_SIZE = np.array([0.07, 0.07, 0.04], dtype=np.float64)  # half-extents
 BOX_WALL = 0.005  # wall thickness
+BOX_CENTER_Z_PRIOR = CUBE_REST_Z + BOX_SIZE[2] - BOX_WALL + 0.002
+PLACE_INSIDE_Z_TOL = 0.008
 
 
 def inject_control_actuators(xml_content: str) -> str:
@@ -269,9 +406,8 @@ def configure_finger_mesh_collision(xml_content: str) -> str:
     """Use Link7/Link8 as the real gripper contact bodies.
 
     Keep the visible gripper geometry unchanged.  Link7/Link8 stay as the
-    physical fingertip meshes, with a thin invisible inner skin pad at the
-    tactile sites so the cube is held by a real contact patch instead of one
-    mesh contact point per side.
+    physical fingertip meshes.  The electric-skin sites are only sensing
+    volumes; they are not extra pads, support blocks, or collision geometry.
     """
     left_marker = '<geom type="mesh" rgba="0.592157 0.666667 0.682353 1" mesh="Link7" />'
     right_marker = '<geom type="mesh" rgba="0.592157 0.666667 0.682353 1" mesh="Link8" />'
@@ -280,27 +416,19 @@ def configure_finger_mesh_collision(xml_content: str) -> str:
     left_collision = (
         '<geom name="left_finger_collision" type="mesh" '
         'rgba="0.592157 0.666667 0.682353 1" mesh="Link7" '
-        'condim="6" friction="18.0 8.0 3.0" '
-        'solimp="0.90 0.98 0.001" solref="0.012 1" />\n'
-        '                    <geom name="left_inner_pad_collision" type="box" '
-        'pos="-0.005 -0.0005 0.002" size="0.017 0.020 0.003" '
-        'rgba="0 0 0 0" condim="6" friction="24.0 10.0 4.0" '
-        'solimp="0.95 0.99 0.0006" solref="0.010 1" />\n'
+        'condim="6" friction="260.0 100.0 36.0" '
+        'solimp="0.97 0.995 0.0005" solref="0.004 1" />\n'
         '                    <site name="left_inner_skin_site" type="ellipsoid" '
-        'pos="-0.005 -0.0005 0.002" size="0.017 0.020 0.004" '
+        'pos="-0.005 -0.0005 0.002" size="0.020 0.022 0.010" '
         'rgba="0 0 0 0" group="5" />'
     )
     right_collision = (
         '<geom name="right_finger_collision" type="mesh" '
         'rgba="0.592157 0.666667 0.682353 1" mesh="Link8" '
-        'condim="6" friction="18.0 8.0 3.0" '
-        'solimp="0.90 0.98 0.001" solref="0.012 1" />\n'
-        '                    <geom name="right_inner_pad_collision" type="box" '
-        'pos="-0.005 0.0005 0.002" size="0.017 0.020 0.003" '
-        'rgba="0 0 0 0" condim="6" friction="24.0 10.0 4.0" '
-        'solimp="0.95 0.99 0.0006" solref="0.010 1" />\n'
+        'condim="6" friction="260.0 100.0 36.0" '
+        'solimp="0.97 0.995 0.0005" solref="0.004 1" />\n'
         '                    <site name="right_inner_skin_site" type="ellipsoid" '
-        'pos="-0.005 0.0005 0.002" size="0.017 0.020 0.004" '
+        'pos="-0.005 0.0005 0.002" size="0.020 0.022 0.010" '
         'rgba="0 0 0 0" group="5" />'
     )
     if 'name="left_finger_collision"' not in xml_content:
@@ -470,12 +598,12 @@ class BallDetector:
         cam_pos = data.cam_xpos[self._camera_id].copy()
         cam_mat = data.cam_xmat[self._camera_id].reshape(3, 3)
 
-        fovy = float(self._model.cam_fovy[self._camera_id])
-        f_px = (img_h / 2.0) / math.tan(math.radians(fovy) / 2.0)
+        fx_px = (img_w / 2.0) / math.tan(math.radians(D405C_DEPTH_FOVX_DEG) / 2.0)
+        fy_px = (img_h / 2.0) / math.tan(math.radians(D405C_DEPTH_FOVY_DEG) / 2.0)
 
         depths = depths.astype(np.float64)
-        x_cam = (xs.astype(np.float64) - img_w / 2.0) * depths / f_px
-        y_cam = (img_h / 2.0 - ys.astype(np.float64)) * depths / f_px
+        x_cam = (xs.astype(np.float64) - img_w / 2.0) * depths / fx_px
+        y_cam = (img_h / 2.0 - ys.astype(np.float64)) * depths / fy_px
         z_cam = -depths
         pts_cam = np.column_stack((x_cam, y_cam, z_cam))
         return cam_pos + pts_cam @ cam_mat.T
@@ -490,7 +618,11 @@ class BallDetector:
         if x0 >= x1 or y0 >= y1:
             return None
         patch = depth[y0:y1, x0:x1]
-        valid = np.isfinite(patch) & (patch > 1e-4) & (patch < MAX_RGBD_DEPTH_M)
+        valid = (
+            np.isfinite(patch) &
+            (patch >= MIN_RGBD_DEPTH_M) &
+            (patch <= MAX_RGBD_DEPTH_M)
+        )
 
         if self._last_detection_mask is not None:
             mask_patch = self._last_detection_mask[y0:y1, x0:x1] > 0
@@ -517,8 +649,8 @@ class BallDetector:
         samples = depth[ys, xs]
         valid = (
             np.isfinite(samples) &
-            (samples > 1e-4) &
-            (samples < MAX_RGBD_DEPTH_M)
+            (samples >= MIN_RGBD_DEPTH_M) &
+            (samples <= MAX_RGBD_DEPTH_M)
         )
         if np.count_nonzero(valid) < MIN_DEPTH_SAMPLES:
             return None
@@ -697,6 +829,212 @@ class BallDetector:
         return [normal, -normal, edge, -edge]
 
 
+class TargetBoxDetector:
+    """Find the blue placement box in RGB-D and estimate its opening centre."""
+
+    def __init__(self, model, camera_id: int):
+        self._model = model
+        self._camera_id = camera_id
+        self.last_estimated_xyz: np.ndarray | None = None
+        self.last_raw_center_xyz: np.ndarray | None = None
+        self.last_area_px = 0.0
+        self.last_points = 0
+        self.last_extent_m = np.zeros(3, dtype=np.float64)
+        self.last_center_correction_m = 0.0
+        self.last_footprint_inside_ratio = 0.0
+
+    def _clear_detection(self) -> None:
+        self.last_estimated_xyz = None
+        self.last_raw_center_xyz = None
+        self.last_area_px = 0.0
+        self.last_points = 0
+        self.last_extent_m = np.zeros(3, dtype=np.float64)
+        self.last_center_correction_m = 0.0
+        self.last_footprint_inside_ratio = 0.0
+
+    def _back_project_pixels(self, xs: np.ndarray, ys: np.ndarray,
+                             depths: np.ndarray, data,
+                             img_w: int, img_h: int) -> np.ndarray:
+        cam_pos = data.cam_xpos[self._camera_id].copy()
+        cam_mat = data.cam_xmat[self._camera_id].reshape(3, 3)
+        fx_px = (img_w / 2.0) / math.tan(math.radians(D405C_DEPTH_FOVX_DEG) / 2.0)
+        fy_px = (img_h / 2.0) / math.tan(math.radians(D405C_DEPTH_FOVY_DEG) / 2.0)
+
+        depths = depths.astype(np.float64)
+        x_cam = (xs.astype(np.float64) - img_w / 2.0) * depths / fx_px
+        y_cam = (img_h / 2.0 - ys.astype(np.float64)) * depths / fy_px
+        z_cam = -depths
+        pts_cam = np.column_stack((x_cam, y_cam, z_cam))
+        return cam_pos + pts_cam @ cam_mat.T
+
+    def _complete_axis_center(
+        self,
+        lo: float,
+        hi: float,
+        mean: float,
+        cam_coord: float,
+        half_extent: float,
+    ) -> float:
+        full_extent = 2.0 * float(half_extent)
+        observed_extent = float(hi - lo)
+        if observed_extent >= full_extent * BOX_FOOTPRINT_FULL_EXTENT_RATIO:
+            return 0.5 * (float(lo) + float(hi))
+        if cam_coord >= mean:
+            return float(hi) - float(half_extent)
+        return float(lo) + float(half_extent)
+
+    def _complete_box_center_from_cloud(
+        self,
+        cloud: np.ndarray,
+        data,
+        lo: np.ndarray,
+        hi: np.ndarray,
+    ) -> tuple[np.ndarray, float, float]:
+        raw_center = 0.5 * (lo + hi)
+        cam_pos = data.cam_xpos[self._camera_id].copy()
+        mean_xy = np.median(cloud[:, :2], axis=0)
+        center = raw_center.copy()
+        center[0] = self._complete_axis_center(
+            lo[0], hi[0], mean_xy[0], cam_pos[0], BOX_SIZE[0])
+        center[1] = self._complete_axis_center(
+            lo[1], hi[1], mean_xy[1], cam_pos[1], BOX_SIZE[1])
+        center[2] = raw_center[2]
+
+        footprint_lo = center[:2] - BOX_SIZE[:2] - BOX_FOOTPRINT_VALID_MARGIN
+        footprint_hi = center[:2] + BOX_SIZE[:2] + BOX_FOOTPRINT_VALID_MARGIN
+        inside = np.all(
+            (cloud[:, :2] >= footprint_lo) &
+            (cloud[:, :2] <= footprint_hi),
+            axis=1,
+        )
+        inside_ratio = float(np.count_nonzero(inside)) / max(float(cloud.shape[0]), 1.0)
+        correction = float(np.linalg.norm(center[:2] - raw_center[:2]))
+        return center, correction, inside_ratio
+
+    def estimate_3d_from_rgbd(self, rgb: np.ndarray, depth_img: np.ndarray,
+                              data, img_w: int, img_h: int) -> np.ndarray | None:
+        """Estimate box centre from the observed blue wall/bottom cloud.
+
+        The scene still injects the box at a simulator position, but planning
+        below consumes only this camera estimate.
+        """
+        self._clear_detection()
+        if self._camera_id < 0 or not CV2_AVAILABLE:
+            return None
+        depth = np.asarray(depth_img, dtype=np.float64)
+        if depth.ndim != 2:
+            return None
+        img_h, img_w = depth.shape
+
+        hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+        mask = cv2.inRange(hsv, BOX_BLUE_HSV_LOWER, BOX_BLUE_HSV_UPPER)
+        rgb_i = rgb.astype(np.int16)
+        red = rgb_i[:, :, 0]
+        green = rgb_i[:, :, 1]
+        blue = rgb_i[:, :, 2]
+        rgb_blue = (
+            (blue >= BOX_BLUE_MIN) &
+            (blue >= red + BOX_BLUE_RED_MARGIN) &
+            (green >= red + BOX_GREEN_RED_MARGIN) &
+            (blue >= green + BOX_BLUE_GREEN_MARGIN)
+        )
+        mask |= (rgb_blue.astype(np.uint8) * 255)
+
+        valid_depth = (
+            np.isfinite(depth) &
+            (depth >= MIN_RGBD_DEPTH_M) &
+            (depth <= MAX_RGBD_DEPTH_M)
+        )
+        mask &= (valid_depth.astype(np.uint8) * 255)
+        kernel3 = np.ones((3, 3), np.uint8)
+        kernel5 = np.ones((5, 5), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel3, iterations=1)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel5, iterations=2)
+
+        contours, _ = cv2.findContours(
+            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        best_score = -float("inf")
+        best_center: np.ndarray | None = None
+        best_raw_center: np.ndarray | None = None
+        best_area = 0.0
+        best_points = 0
+        best_extent = np.zeros(3, dtype=np.float64)
+        best_correction = 0.0
+        best_inside_ratio = 0.0
+        expected_xy = BOX_SIZE[:2] * 2.0
+        min_xy_extent = BOX_SIZE[:2] * 0.65
+        min_z_extent = BOX_SIZE[2] * 0.35
+
+        for contour in contours:
+            area = float(cv2.contourArea(contour))
+            if area < MIN_BOX_AREA_PX:
+                continue
+            contour_mask = np.zeros(mask.shape, dtype=np.uint8)
+            cv2.drawContours(contour_mask, [contour], -1, 255, thickness=cv2.FILLED)
+            ys, xs = np.nonzero((contour_mask > 0) & valid_depth)
+            if xs.size < MIN_BOX_DEPTH_SAMPLES:
+                continue
+            if xs.size > 5000:
+                idx = np.linspace(0, xs.size - 1, 5000).astype(np.int64)
+                xs = xs[idx]
+                ys = ys[idx]
+            cloud = self._back_project_pixels(
+                xs, ys, depth[ys, xs], data, img_w, img_h)
+            z_ok = (
+                (cloud[:, 2] >= BOX_DETECTION_Z_MIN) &
+                (cloud[:, 2] <= BOX_DETECTION_Z_MAX)
+            )
+            xy_ok = np.linalg.norm(cloud[:, :2], axis=1) <= (WORKSPACE_R_MAX + 0.20)
+            cloud = cloud[z_ok & xy_ok]
+            if cloud.shape[0] < MIN_BOX_DEPTH_SAMPLES:
+                continue
+
+            lo = np.percentile(cloud, 3, axis=0)
+            hi = np.percentile(cloud, 97, axis=0)
+            extent = hi - lo
+            if (extent[0] < min_xy_extent[0] or
+                    extent[1] < min_xy_extent[1] or
+                    extent[2] < min_z_extent):
+                continue
+            raw_center = 0.5 * (lo + hi)
+            center, correction, inside_ratio = self._complete_box_center_from_cloud(
+                cloud, data, lo, hi)
+            if inside_ratio < 0.86:
+                continue
+            center[2] = float(np.clip(
+                center[2], CUBE_REST_Z, BOX_DETECTION_Z_MAX))
+            extent_penalty = float(np.linalg.norm(np.maximum(expected_xy - extent[:2], 0.0)))
+            score = (
+                area +
+                0.12 * cloud.shape[0] -
+                900.0 * extent_penalty +
+                1200.0 * inside_ratio -
+                80.0 * correction
+            )
+            if score > best_score:
+                best_score = score
+                best_center = center
+                best_raw_center = raw_center
+                best_area = area
+                best_points = int(cloud.shape[0])
+                best_extent = extent
+                best_correction = correction
+                best_inside_ratio = inside_ratio
+
+        if best_center is None:
+            return None
+        self.last_estimated_xyz = best_center.copy()
+        self.last_raw_center_xyz = (
+            None if best_raw_center is None else best_raw_center.copy()
+        )
+        self.last_area_px = best_area
+        self.last_points = best_points
+        self.last_extent_m = best_extent.copy()
+        self.last_center_correction_m = best_correction
+        self.last_footprint_inside_ratio = best_inside_ratio
+        return best_center
+
+
 # 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 # Non-blocking smooth arm controller
 # 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
@@ -725,6 +1063,7 @@ class SmoothArmController:
         self._total_frames = 1
         self._done = True
         self._settle_left = 0
+        self._post_settle_frames = 0
 
     @property
     def done(self) -> bool:
@@ -732,7 +1071,10 @@ class SmoothArmController:
         return (
             self._done and
             self._settle_left <= 0 and
-            self.physically_settled()
+            (
+                self.physically_settled() or
+                self._post_settle_frames >= ARM_DONE_MAX_SETTLE_FRAMES
+            )
         )
 
     def near_done(self, fraction: float = 0.92) -> bool:
@@ -740,13 +1082,17 @@ class SmoothArmController:
         return self._done or self._progress >= float(np.clip(fraction, 0.0, 1.0))
 
     def physically_settled(self) -> bool:
+        q_err, max_qvel = self.settle_metrics()
+        return q_err <= ARM_DONE_QPOS_TOL and max_qvel <= ARM_DONE_QVEL_TOL
+
+    def settle_metrics(self) -> tuple[float, float]:
         q_err = float(np.max(np.abs(self.current() - self._target)))
         qvels = []
         for jid in self._joints:
             dof = self._model.jnt_dofadr[jid]
             qvels.append(abs(float(self._data.qvel[dof])))
         max_qvel = max(qvels) if qvels else 0.0
-        return q_err <= ARM_DONE_QPOS_TOL and max_qvel <= ARM_DONE_QVEL_TOL
+        return q_err, max_qvel
 
     def current(self) -> np.ndarray:
         return np.array([self._data.qpos[self._model.jnt_qposadr[j]]
@@ -769,11 +1115,15 @@ class SmoothArmController:
         self._progress = 0.0
         self._done = False
         self._settle_left = 0
+        self._post_settle_frames = 0
 
     def step(self) -> None:
         if self._done:
             if self._settle_left > 0:
                 self._settle_left -= 1
+                self._post_settle_frames = 0
+            else:
+                self._post_settle_frames += 1
             # Always hold the final target so the PD actuators can converge
             self._write_angles(self._target)
             return
@@ -886,8 +1236,8 @@ class SmoothGripperController:
         if self._mode == "hold":
             self._force_ema = 0.85 * self._force_ema + 0.15 * measured_force
             low_force = max(GRIP_LOCK_MIN_FORCE, force_threshold - GRIP_FORCE_DEADBAND)
-            if self._force_ema > max_force:
-                self._relax_hold(GRIP_HOLD_CORRECTION * 4.0)
+            if self._force_ema > max_force + GRIP_ACTUATOR_RELAX_DEADBAND:
+                self._relax_hold(GRIP_OVERFORCE_RELAX_CORRECTION)
             elif self._force_ema < low_force and self._hold_left % 4 == 0:
                 self._tighten_hold(GRIP_HOLD_CORRECTION)
             self._write_final()
@@ -944,26 +1294,73 @@ class SmoothGripperController:
         min_force: float = SKIN_HOLD_MIN_FORCE,
         target_force: float = SKIN_HOLD_TARGET_FORCE,
         max_force: float = SKIN_HOLD_MAX_FORCE,
+        correction_scale: float = 1.0,
     ) -> None:
         if self._mode != "hold" or self._done:
             return
+        correction_scale = float(np.clip(correction_scale, 0.05, 1.0))
         left = max(0.0, float(reading.left_force))
         right = max(0.0, float(reading.right_force))
         low_side = min(left, right)
+        high_side = max(left, right)
         avg_force = 0.5 * (left + right)
+        imbalance = abs(left - right)
+        if reading.balance > 0.45 and low_side < target_force:
+            weak_side = "left" if left < right else "right"
+            strong_side = "right" if weak_side == "left" else "left"
+            amount = min(
+                GRIP_HOLD_FAST_CORRECTION * correction_scale,
+                GRIP_HOLD_CORRECTION *
+                correction_scale *
+                (1.2 + imbalance / max(target_force, 1e-6)),
+            )
+            self._nudge_hold_side(weak_side, amount, close=True)
+            if high_side > max_force * 0.92:
+                self._nudge_hold_side(
+                    strong_side,
+                    GRIP_HOLD_RELAX_CORRECTION * 3.0 * correction_scale,
+                    close=False,
+                )
+            if low_side >= min_force * 0.65:
+                return
         if low_side < min_force:
             deficit = min_force - low_side
             amount = min(
-                GRIP_HOLD_FAST_CORRECTION,
-                GRIP_HOLD_CORRECTION * (1.0 + deficit / max(min_force, 1e-6)),
+                GRIP_HOLD_FAST_CORRECTION * correction_scale,
+                GRIP_HOLD_CORRECTION * correction_scale *
+                (1.0 + deficit / max(min_force, 1e-6)),
             )
             self._tighten_hold(amount)
         elif avg_force < target_force:
-            self._tighten_hold(GRIP_HOLD_CORRECTION)
+            self._tighten_hold(GRIP_HOLD_CORRECTION * correction_scale)
         elif avg_force > max_force and reading.balance < 0.45:
-            self._relax_hold(GRIP_HOLD_RELAX_CORRECTION)
+            self._relax_hold(GRIP_HOLD_RELAX_CORRECTION * correction_scale)
         if reading.balance > SKIN_BALANCE_MAX_RATIO and low_side < target_force:
-            self._tighten_hold(GRIP_HOLD_CORRECTION)
+            self._tighten_hold(GRIP_HOLD_CORRECTION * correction_scale)
+
+    def _nudge_hold_side(self, side: str, amount: float, *,
+                         close: bool) -> None:
+        side = side.lower()
+        for item in self._limits:
+            joint_name = (
+                mujoco.mj_id2name(
+                    self._model,
+                    mujoco.mjtObj.mjOBJ_JOINT,
+                    item["joint"],
+                ) or ""
+            ).lower()
+            if side not in joint_name:
+                continue
+            act = self._j2a.get(item["joint"])
+            if act is None:
+                continue
+            val = self._last_ctrl.get(act, self._data.ctrl[act])
+            if close:
+                self._last_ctrl[act] = self._toward_closed(
+                    item, float(val), amount)
+            else:
+                self._last_ctrl[act] = self._toward_open(
+                    item, float(val), amount)
 
     def compensate_visual_slip(self, weight: float, slip_m: float,
                                drop_m: float) -> None:
@@ -982,6 +1379,9 @@ class SmoothGripperController:
             GRIP_HOLD_CORRECTION * weight +
             VISUAL_GRIP_POSITION_CORRECTION_GAIN * excess,
         )
+        if (float(slip_m) >= VISUAL_GRIP_EMERGENCY_SLIP_M or
+                float(drop_m) >= VISUAL_GRIP_EMERGENCY_DROP_M):
+            amount = max(amount, VISUAL_GRIP_EMERGENCY_CORRECTION)
         self._tighten_hold(amount)
 
     def _tighten_hold(self, amount: float) -> None:
@@ -1082,6 +1482,164 @@ def render_workspace_spheres(viewer, reachable: list[np.ndarray]) -> None:
                 mujoco.mjtGeom.mjGEOM_SPHERE,
                 np.array([r, 0, 0]), pt,
                 np.eye(3, 1).flatten(), rgba,
+            )
+
+
+_CUBOID_EDGES = (
+    (0, 1), (1, 2), (2, 3), (3, 0),
+    (4, 5), (5, 6), (6, 7), (7, 4),
+    (0, 4), (1, 5), (2, 6), (3, 7),
+)
+_YELLOW_RGBA = np.array([1.0, 0.86, 0.02, 0.92], dtype=np.float32)
+_RED_AXIS_RGBA = np.array([1.0, 0.12, 0.08, 0.78], dtype=np.float32)
+_GREEN_AXIS_RGBA = np.array([0.10, 0.90, 0.18, 0.78], dtype=np.float32)
+_BLUE_AXIS_RGBA = np.array([0.15, 0.40, 1.0, 0.78], dtype=np.float32)
+
+
+def cuboid_corners(center: np.ndarray, half_extents: np.ndarray) -> np.ndarray:
+    c = np.asarray(center, dtype=np.float64)
+    h = np.asarray(half_extents, dtype=np.float64)
+    return np.array([
+        [c[0] - h[0], c[1] - h[1], c[2] - h[2]],
+        [c[0] + h[0], c[1] - h[1], c[2] - h[2]],
+        [c[0] + h[0], c[1] + h[1], c[2] - h[2]],
+        [c[0] - h[0], c[1] + h[1], c[2] - h[2]],
+        [c[0] - h[0], c[1] - h[1], c[2] + h[2]],
+        [c[0] + h[0], c[1] - h[1], c[2] + h[2]],
+        [c[0] + h[0], c[1] + h[1], c[2] + h[2]],
+        [c[0] - h[0], c[1] + h[1], c[2] + h[2]],
+    ], dtype=np.float64)
+
+
+def _next_user_geom(scene):
+    if scene.ngeom >= scene.maxgeom:
+        return None
+    idx = scene.ngeom
+    scene.ngeom += 1
+    return scene.geoms[idx]
+
+
+def _add_scene_capsule(scene, start: np.ndarray, end: np.ndarray,
+                       rgba: np.ndarray, radius: float = 0.0018) -> None:
+    geom = _next_user_geom(scene)
+    if geom is None:
+        return
+    mujoco.mjv_initGeom(
+        geom,
+        mujoco.mjtGeom.mjGEOM_CAPSULE,
+        np.array([radius, 0.0, 0.0], dtype=np.float64),
+        np.zeros(3, dtype=np.float64),
+        np.eye(3, dtype=np.float64).reshape(-1),
+        rgba,
+    )
+    mujoco.mjv_connector(
+        geom,
+        mujoco.mjtGeom.mjGEOM_CAPSULE,
+        radius,
+        np.asarray(start, dtype=np.float64),
+        np.asarray(end, dtype=np.float64),
+    )
+    geom.rgba[:] = rgba
+
+
+def _add_scene_dashed_line(scene, start: np.ndarray, end: np.ndarray,
+                           rgba: np.ndarray = _YELLOW_RGBA,
+                           segments: int = 12) -> None:
+    start = np.asarray(start, dtype=np.float64)
+    end = np.asarray(end, dtype=np.float64)
+    for idx in range(segments):
+        if idx % 2:
+            continue
+        t0 = idx / segments
+        t1 = (idx + 0.68) / segments
+        p0 = start + (end - start) * t0
+        p1 = start + (end - start) * min(t1, 1.0)
+        _add_scene_capsule(scene, p0, p1, rgba)
+
+
+def _add_scene_label(scene, text: str, pos: np.ndarray,
+                     rgba: np.ndarray = _YELLOW_RGBA) -> None:
+    geom = _next_user_geom(scene)
+    if geom is None:
+        return
+    mujoco.mjv_initGeom(
+        geom,
+        mujoco.mjtGeom.mjGEOM_LABEL,
+        np.array([0.0, 0.0, 0.0], dtype=np.float64),
+        np.asarray(pos, dtype=np.float64),
+        np.eye(3, dtype=np.float64).reshape(-1),
+        rgba,
+    )
+    geom.label = text[:120]
+
+
+def _add_scene_cuboid(scene, center: np.ndarray, half_extents: np.ndarray,
+                      label: str) -> None:
+    corners = cuboid_corners(center, half_extents)
+    for a, b in _CUBOID_EDGES:
+        _add_scene_dashed_line(scene, corners[a], corners[b])
+    label_pos = np.asarray(center, dtype=np.float64).copy()
+    label_pos += np.array([
+        half_extents[0] + 0.018,
+        half_extents[1] + 0.012,
+        half_extents[2] + 0.028,
+    ], dtype=np.float64)
+    dims_mm = np.asarray(half_extents, dtype=np.float64) * 2000.0
+    text = (
+        f"{label} base/world xyz=({center[0]:.3f},{center[1]:.3f},{center[2]:.3f})m "
+        f"LWH=({dims_mm[0]:.0f},{dims_mm[1]:.0f},{dims_mm[2]:.0f})mm"
+    )
+    _add_scene_label(scene, text, label_pos)
+
+
+def _add_scene_base_frame_hint(scene) -> None:
+    origin = np.array([0.0, 0.0, 0.035], dtype=np.float64)
+    _add_scene_capsule(scene, origin, origin + np.array([0.065, 0.0, 0.0]), _RED_AXIS_RGBA)
+    _add_scene_capsule(scene, origin, origin + np.array([0.0, 0.065, 0.0]), _GREEN_AXIS_RGBA)
+    _add_scene_capsule(scene, origin, origin + np.array([0.0, 0.0, 0.065]), _BLUE_AXIS_RGBA)
+    _add_scene_label(
+        scene,
+        "base/world frame origin: robot base center",
+        origin + np.array([0.012, -0.030, 0.078], dtype=np.float64),
+    )
+
+
+def render_scene_annotations(viewer, reachable: list[np.ndarray],
+                             cube_xyz: np.ndarray | None,
+                             box_xyz: np.ndarray | None) -> None:
+    with viewer.lock():
+        viewer.user_scn.ngeom = 0
+        if reachable:
+            r = 0.007
+            rgba = np.array([0.0, 0.85, 0.25, 0.30], dtype=np.float32)
+            for pt in reachable[:WORKSPACE_MAX_SPHERES]:
+                geom = _next_user_geom(viewer.user_scn)
+                if geom is None:
+                    break
+                mujoco.mjv_initGeom(
+                    geom,
+                    mujoco.mjtGeom.mjGEOM_SPHERE,
+                    np.array([r, 0.0, 0.0], dtype=np.float64),
+                    np.asarray(pt, dtype=np.float64),
+                    np.eye(3, dtype=np.float64).reshape(-1),
+                    rgba,
+                )
+        if cube_xyz is not None or box_xyz is not None:
+            _add_scene_base_frame_hint(viewer.user_scn)
+        if cube_xyz is not None:
+            _add_scene_cuboid(
+                viewer.user_scn,
+                np.asarray(cube_xyz, dtype=np.float64),
+                np.array([CUBE_HALF_SIZE, CUBE_HALF_SIZE, CUBE_HALF_SIZE],
+                         dtype=np.float64),
+                "red cube",
+            )
+        if box_xyz is not None:
+            _add_scene_cuboid(
+                viewer.user_scn,
+                np.asarray(box_xyz, dtype=np.float64),
+                BOX_SIZE,
+                "blue box",
             )
 
 
@@ -1227,6 +1785,28 @@ def make_tool_xmat(z_axis: np.ndarray, opening_hint: np.ndarray) -> np.ndarray:
     return np.column_stack((x_axis, y_axis, z_axis))
 
 
+def camera_forward_world(xmat: np.ndarray) -> np.ndarray:
+    return _unit(
+        np.asarray(xmat, dtype=np.float64) @ CAMERA_FORWARD_LOCAL,
+        np.array([0.0, 0.0, -1.0], dtype=np.float64),
+    )
+
+
+def gripper_target_for_camera_aim(
+    aim: np.ndarray,
+    xmat: np.ndarray,
+    distance: float = SCAN_CAMERA_DISTANCE,
+) -> np.ndarray:
+    """Return pinch-center target whose side-mounted D405C optical ray hits aim."""
+    xmat = np.asarray(xmat, dtype=np.float64)
+    cam_offset_world = xmat @ CAMERA_LOCAL_OFFSET_FROM_PINCH
+    return (
+        np.asarray(aim, dtype=np.float64) -
+        float(distance) * camera_forward_world(xmat) -
+        cam_offset_world
+    )
+
+
 def contact_patch_span(points: list[np.ndarray], xmat: np.ndarray | None) -> float:
     if len(points) < 2:
         return 0.0
@@ -1271,13 +1851,22 @@ def contact_alignment_metrics(left_points: list[np.ndarray],
     return pair_skew, center_err
 
 
+def orientation_error_norm(current_xmat: np.ndarray, target_xmat: np.ndarray) -> float:
+    current = np.asarray(current_xmat, dtype=np.float64).reshape(3, 3)
+    target = np.asarray(target_xmat, dtype=np.float64).reshape(3, 3)
+    err = (
+        np.cross(current[:, 0], target[:, 0]) +
+        np.cross(current[:, 1], target[:, 1]) +
+        np.cross(current[:, 2], target[:, 2])
+    )
+    return float(np.linalg.norm(err))
+
+
 def generate_grasp_orientations(
     ball_xyz: np.ndarray,
     opening_hints: list[np.ndarray] | None = None,
 ) -> list[np.ndarray]:
-    """Generate only vertical top-down grasps for the first cube approach."""
-    radial = _radial_xy(ball_xyz[:2])
-    tangent = _tangent_xy(radial)
+    """Generate vertical top-down grasps that clamp opposite cube faces."""
     candidates: list[np.ndarray] = []
     seen: set[tuple[float, ...]] = set()
 
@@ -1287,12 +1876,12 @@ def generate_grasp_orientations(
         np.array([0.0, -1.0, 0.0], dtype=np.float64),
         np.array([1.0, 0.0, 0.0], dtype=np.float64),
         np.array([-1.0, 0.0, 0.0], dtype=np.float64),
-        tangent, -tangent,
     ])
     if opening_hints:
-        # The red square contour is strongly perspective-dependent in the
-        # wrist camera.  Use it only to choose the nearest cube-side/world
-        # axis; raw diagonal contour axes led to awkward diagonal jaw poses.
+        # The red square contour is perspective-dependent in the wrist camera.
+        # Use it only after snapping to world X/Y.  Diagonal opening axes clamp
+        # two cube edges instead of two opposite faces and are deliberately
+        # excluded from the first grasp.
         for hint in opening_hints:
             base_hints.append(_nearest_world_opening_axis(hint))
 
@@ -1306,7 +1895,29 @@ def generate_grasp_orientations(
     return candidates
 
 
-def grasp_stability_score(xmat: np.ndarray, ball_xyz: np.ndarray) -> float:
+def grasp_transport_alignment(
+    xmat: np.ndarray,
+    ball_xyz: np.ndarray,
+    box_xyz: np.ndarray | None,
+) -> float:
+    """How well the jaw normal resists the carry direction in XY."""
+    if box_xyz is None:
+        return 1.0
+    transport_xy = np.asarray(box_xyz[:2], dtype=np.float64) - np.asarray(
+        ball_xyz[:2], dtype=np.float64)
+    norm = float(np.linalg.norm(transport_xy))
+    if norm <= 1e-6:
+        return 1.0
+    transport_dir = transport_xy / norm
+    y_axis = np.asarray(xmat[:, 1], dtype=np.float64)
+    return abs(float(np.dot(y_axis[:2], transport_dir)))
+
+
+def grasp_stability_score(
+    xmat: np.ndarray,
+    ball_xyz: np.ndarray,
+    box_xyz: np.ndarray | None = None,
+) -> float:
     """Prefer a real parallel-jaw top grasp.
 
     The previous score preferred a large radial tilt.  That can still lift in
@@ -1325,14 +1936,120 @@ def grasp_stability_score(xmat: np.ndarray, ball_xyz: np.ndarray) -> float:
     tangent_opening = abs(tangent_opening_signed)
     world_axis_alignment = max(abs(float(np.dot(y_axis, np.array([1.0, 0.0, 0.0])))),
                                abs(float(np.dot(y_axis, np.array([0.0, 1.0, 0.0])))))
+    diagonal_penalty = GRASP_DIAGONAL_OPENING_WEIGHT * max(
+        0.0, 0.995 - world_axis_alignment)
+    transport_penalty = 0.0
+    if box_xyz is not None:
+        transport_alignment = grasp_transport_alignment(xmat, ball_xyz, box_xyz)
+        # Prefer a jaw normal with enough component along the carry direction
+        # so the thin electronic-skin surfaces can preload the cube before
+        # lateral motion, while the physical preview still rejects bad poses.
+        transport_penalty = (
+            GRASP_TRANSPORT_AXIS_WEIGHT *
+            max(0.0, GRASP_TRANSPORT_TARGET_ALIGNMENT - transport_alignment)
+        )
     return (
         80.0 * horizontal_tilt +
         20.0 * max(0.0, 0.999 - downward) +
         GRASP_WORLD_AXIS_WEIGHT * max(0.0, 0.98 - world_axis_alignment) +
+        diagonal_penalty +
+        transport_penalty +
         0.15 * radial_opening +
         0.10 * max(0.0, -tangent_opening_signed) +
         0.08 * max(0.0, 0.75 - tangent_opening)
     )
+
+
+def grasp_opening_hint_score(
+    xmat: np.ndarray,
+    opening_hints: list[np.ndarray] | None,
+) -> float:
+    """Prefer the snapped RGB-D face normal when it is available."""
+    if not opening_hints:
+        return 0.0
+    y_axis = _unit(xmat[:, 1], np.array([1.0, 0.0, 0.0], dtype=np.float64))
+    y_xy = _unit(y_axis[:2], np.array([1.0, 0.0], dtype=np.float64))
+    best = 0.0
+    for hint in opening_hints:
+        hint_axis = _nearest_world_opening_axis(hint)
+        hint_xy = _unit(hint_axis[:2], np.array([1.0, 0.0], dtype=np.float64))
+        best = max(best, abs(float(np.dot(y_xy, hint_xy))))
+    return GRASP_OPENING_HINT_WEIGHT * max(
+        0.0,
+        GRASP_OPENING_HINT_ALIGNMENT - best,
+    )
+
+
+def expand_face_opening_hints(
+    opening_hints: list[np.ndarray] | None,
+) -> list[np.ndarray]:
+    """Keep face-centered grasps while allowing the orthogonal cube-face pair."""
+    if not opening_hints:
+        return []
+    expanded: list[np.ndarray] = []
+    seen: set[tuple[float, float, float]] = set()
+
+    def add(axis: np.ndarray) -> None:
+        axis = _nearest_world_opening_axis(axis)
+        key = tuple(float(v) for v in axis)
+        if key not in seen:
+            seen.add(key)
+            expanded.append(axis)
+
+    for hint in opening_hints:
+        axis = _nearest_world_opening_axis(hint)
+        add(axis)
+        add(-axis)
+        perp = np.array([-axis[1], axis[0], 0.0], dtype=np.float64)
+        add(perp)
+        add(-perp)
+    return expanded
+
+
+def carry_height_for_xy(target_xy: np.ndarray, box_xyz: np.ndarray) -> float:
+    """Keep most transport low; raise only near the open box."""
+    target_xy = np.asarray(target_xy, dtype=np.float64)
+    box_xyz = np.asarray(box_xyz, dtype=np.float64)
+    dist_to_box = float(np.linalg.norm(target_xy[:2] - box_xyz[:2]))
+    if dist_to_box <= CARRY_FINAL_RAISE_XY_M:
+        return float(box_xyz[2] + PLACE_ABOVE_HEIGHT)
+    return float(max(CUBE_REST_Z + CARRY_CRUISE_HEIGHT, box_xyz[2] + 0.025))
+
+
+def carry_midpoint_for_grasp(cube_xyz: np.ndarray,
+                             box_xyz: np.ndarray,
+                             xmat: np.ndarray | None) -> np.ndarray:
+    """Stage transport without combining a large lift and a large lateral move."""
+    cube_xyz = np.asarray(cube_xyz, dtype=np.float64)
+    box_xyz = np.asarray(box_xyz, dtype=np.float64)
+    if xmat is None:
+        xy = 0.5 * (cube_xyz[:2] + box_xyz[:2])
+    else:
+        opening_axis = _unit(
+            np.asarray(xmat, dtype=np.float64)[:, 1],
+            np.array([1.0, 0.0, 0.0], dtype=np.float64),
+        )
+        opening_axis[2] = 0.0
+        opening_axis = _unit(
+            opening_axis,
+            np.array([1.0, 0.0, 0.0], dtype=np.float64),
+        )
+        delta = box_xyz[:2] - cube_xyz[:2]
+        normal_part = float(np.dot(delta, opening_axis[:2])) * opening_axis[:2]
+        tangent_part = delta - normal_part
+        xy = cube_xyz[:2] + 0.60 * normal_part + 0.55 * tangent_part
+        if float(np.linalg.norm(xy - cube_xyz[:2])) < 0.025:
+            xy = cube_xyz[:2] + 0.35 * delta
+        first_step = xy - cube_xyz[:2]
+        first_step_len = float(np.linalg.norm(first_step))
+        if first_step_len > CARRY_STEP_MAX_XY_M:
+            xy = cube_xyz[:2] + first_step / first_step_len * CARRY_STEP_MAX_XY_M
+    carry_z = carry_height_for_xy(xy, box_xyz)
+    return np.array([
+        xy[0],
+        xy[1],
+        carry_z,
+    ], dtype=np.float64)
 
 
 def generate_scan_targets(
@@ -1366,21 +2083,24 @@ def generate_scan_targets(
     seen: set[tuple[float, ...]] = set()
 
     def add_target(aim: np.ndarray, xmat: np.ndarray) -> None:
-        z_axis = xmat[:, 2]
-        gripper = aim - (SCAN_CAMERA_DISTANCE - CAMERA_TO_GRIPPER_CENTER) * z_axis
+        gripper = gripper_target_for_camera_aim(aim, xmat)
         key = tuple(np.round(np.concatenate((aim, gripper, xmat.reshape(-1))), 4))
         if key not in seen:
             seen.add(key)
             targets.append(ScanTarget(aim=aim, gripper=gripper, xmat=xmat))
 
-    # Full-workspace polar pass.  These poses visibly move around the base,
-    # and each camera ray points straight down at the ring sample.
+    # Full-workspace polar pass.  The D405C is side-mounted on Link6, so yaw is
+    # chosen per workspace cell and the scan target uses the real camera
+    # extrinsic instead of assuming the optical axis equals the tool z-axis.
     for xy in grid:
         aim = np.array([xy[0], xy[1], z_plane], dtype=np.float64)
-        add_target(aim, make_tool_xmat(
-            np.array([0.0, 0.0, -1.0], dtype=np.float64),
-            np.array([0.0, 1.0, 0.0], dtype=np.float64),
-        ))
+        radial = _radial_xy(xy)
+        tangent = _tangent_xy(radial)
+        for opening in (tangent, -tangent):
+            add_target(aim, make_tool_xmat(
+                np.array([0.0, 0.0, -1.0], dtype=np.float64),
+                opening,
+            ))
 
     # Secondary angled pass for edge views, kept after the raster pass so a
     # stale hint cannot trap the search in a small local loop.
@@ -1395,6 +2115,68 @@ def generate_scan_targets(
                 np.array([0.0, 0.0, -1.0], dtype=np.float64),
             )
             add_target(aim, make_tool_xmat(z_axis, tangent))
+    return targets
+
+
+def generate_box_scan_targets(
+    hint_xy: np.ndarray | None = None,
+    z_plane: float = CUBE_REST_Z,
+) -> list[ScanTarget]:
+    """Prioritize views likely to see a complete blue box opening."""
+    targets: list[ScanTarget] = []
+    seen: set[tuple[float, ...]] = set()
+
+    def add_target(aim_xy: np.ndarray, opening_hint: np.ndarray) -> None:
+        aim_xy = workspace_project_xy(np.asarray(aim_xy, dtype=np.float64))
+        aim = np.array([aim_xy[0], aim_xy[1], max(float(z_plane), CUBE_REST_Z)],
+                       dtype=np.float64)
+        xmat = make_tool_xmat(np.array([0.0, 0.0, -1.0], dtype=np.float64),
+                              opening_hint)
+        gripper = gripper_target_for_camera_aim(aim, xmat)
+        key = tuple(np.round(np.concatenate((aim, gripper, xmat.reshape(-1))), 4))
+        if key not in seen:
+            seen.add(key)
+            targets.append(ScanTarget(aim=aim, gripper=gripper, xmat=xmat))
+
+    def add_views_around(center_xy: np.ndarray) -> None:
+        center_xy = workspace_project_xy(np.asarray(center_xy, dtype=np.float64))
+        offsets = [
+            np.array([0.0, 0.0], dtype=np.float64),
+            np.array([-0.10, 0.03], dtype=np.float64),
+            np.array([-0.105, 0.045], dtype=np.float64),
+            np.array([-0.12, 0.045], dtype=np.float64),
+            np.array([-0.10, 0.06], dtype=np.float64),
+            np.array([-0.12, 0.06], dtype=np.float64),
+            np.array([-0.10, -0.03], dtype=np.float64),
+            np.array([-0.14, 0.0], dtype=np.float64),
+            np.array([-0.14, 0.045], dtype=np.float64),
+            np.array([0.0, 0.10], dtype=np.float64),
+            np.array([0.0, -0.10], dtype=np.float64),
+            np.array([0.10, 0.0], dtype=np.float64),
+            np.array([-0.07, 0.09], dtype=np.float64),
+            np.array([-0.07, -0.09], dtype=np.float64),
+        ]
+        for off in offsets:
+            aim_xy = workspace_project_xy(center_xy + off)
+            radial = _radial_xy(aim_xy)
+            tangent = _tangent_xy(radial)
+            for opening in (tangent, -tangent):
+                add_target(aim_xy, opening)
+
+    if hint_xy is not None:
+        add_views_around(hint_xy)
+
+    # Coarse fallback.  It is still fully autonomous, but starts with broad
+    # useful box views instead of waiting through the full cube polar scan.
+    for radius in (0.28, 0.38, 0.46, 0.20):
+        for deg in (-20, -45, 0, 25, -70, 55, 90, -110, 140, 180):
+            theta = math.radians(deg)
+            xy = np.array([radius * math.cos(theta),
+                           radius * math.sin(theta)], dtype=np.float64)
+            radial = _radial_xy(xy)
+            tangent = _tangent_xy(radial)
+            for opening in (tangent, -tangent):
+                add_target(xy, opening)
     return targets
 
 
@@ -1419,6 +2201,97 @@ def draw_detection_overlay(rgb: np.ndarray, found: bool,
 # 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 # Main
 # 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+def project_world_to_rgbd_pixel(data, camera_id: int, xyz: np.ndarray,
+                                img_w: int, img_h: int) -> tuple[int, int] | None:
+    if camera_id < 0:
+        return None
+    cam_pos = data.cam_xpos[camera_id].copy()
+    cam_mat = data.cam_xmat[camera_id].reshape(3, 3)
+    local = cam_mat.T @ (np.asarray(xyz, dtype=np.float64) - cam_pos)
+    depth = -float(local[2])
+    if depth <= MIN_RGBD_DEPTH_M or depth >= MAX_RGBD_DEPTH_M:
+        return None
+    fx = (img_w / 2.0) / math.tan(math.radians(D405C_DEPTH_FOVX_DEG) / 2.0)
+    fy = (img_h / 2.0) / math.tan(math.radians(D405C_DEPTH_FOVY_DEG) / 2.0)
+    u = int(round(img_w / 2.0 + float(local[0]) * fx / depth))
+    v = int(round(img_h / 2.0 - float(local[1]) * fy / depth))
+    if u < -img_w or u > img_w * 2 or v < -img_h or v > img_h * 2:
+        return None
+    return u, v
+
+
+def draw_image_dashed_line(img: np.ndarray,
+                           p0: tuple[int, int] | None,
+                           p1: tuple[int, int] | None,
+                           color_rgb: tuple[int, int, int] = (255, 255, 0),
+                           segments: int = 12) -> None:
+    if p0 is None or p1 is None:
+        return
+    a = np.array(p0, dtype=np.float64)
+    b = np.array(p1, dtype=np.float64)
+    for idx in range(segments):
+        if idx % 2:
+            continue
+        q0 = a + (b - a) * (idx / segments)
+        q1 = a + (b - a) * min((idx + 0.68) / segments, 1.0)
+        cv2.line(
+            img,
+            tuple(np.round(q0).astype(int)),
+            tuple(np.round(q1).astype(int)),
+            color_rgb,
+            2,
+            cv2.LINE_AA,
+        )
+
+
+def draw_projected_cuboid_overlay(rgb: np.ndarray, data, camera_id: int,
+                                  center: np.ndarray,
+                                  half_extents: np.ndarray,
+                                  label: str) -> np.ndarray:
+    if not CV2_AVAILABLE:
+        return rgb
+    h, w = rgb.shape[:2]
+    center = np.asarray(center, dtype=np.float64)
+    half_extents = np.asarray(half_extents, dtype=np.float64)
+    corners = cuboid_corners(center, half_extents)
+    pixels = [
+        project_world_to_rgbd_pixel(data, camera_id, corner, w, h)
+        for corner in corners
+    ]
+    for a, b in _CUBOID_EDGES:
+        draw_image_dashed_line(rgb, pixels[a], pixels[b])
+
+    label_anchor = center + np.array([
+        half_extents[0] + 0.018,
+        half_extents[1] + 0.012,
+        half_extents[2] + 0.022,
+    ], dtype=np.float64)
+    label_uv = project_world_to_rgbd_pixel(data, camera_id, label_anchor, w, h)
+    if label_uv is None:
+        label_uv = project_world_to_rgbd_pixel(data, camera_id, center, w, h)
+    if label_uv is not None:
+        u = int(np.clip(label_uv[0], 6, max(6, w - 220)))
+        v = int(np.clip(label_uv[1], 34, max(34, h - 46)))
+        dims_mm = half_extents * 2000.0
+        lines = [
+            f"{label} base/world",
+            f"xyz=({center[0]:.3f},{center[1]:.3f},{center[2]:.3f})m",
+            f"LWH=({dims_mm[0]:.0f},{dims_mm[1]:.0f},{dims_mm[2]:.0f})mm",
+        ]
+        for row, text in enumerate(lines):
+            cv2.putText(
+                rgb,
+                text,
+                (u, v + row * 16),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.42,
+                (255, 255, 0),
+                1,
+                cv2.LINE_AA,
+            )
+    return rgb
+
+
 def main() -> None:
     print("=" * 62)
     print("Interactive Grasping Demo")
@@ -1463,8 +2336,8 @@ def main() -> None:
             <freejoint/>
             <geom name="cube_geom" type="box" size="{CUBE_HALF_SIZE} {CUBE_HALF_SIZE} {CUBE_HALF_SIZE}"
                   rgba="1 0.3 0.3 0.9" mass="0.060" condim="6"
-                  friction="8.0 3.0 1.2" solimp="0.95 0.99 0.001"
-                  solref="0.015 1"/>
+                  friction="65.0 28.0 10.0" solimp="0.97 0.995 0.0005"
+                  solref="0.010 1"/>
         </body>"""
         xml_content = xml_content.replace("</worldbody>", custom_cube_xml + "\n  </worldbody>")
     xml_content = inject_wrist_camera(xml_content)
@@ -1488,19 +2361,19 @@ def main() -> None:
     # finger servo so real two-sided contact has enough normal force.
     xml_content = xml_content.replace(
         '<joint name="left_finger" pos="0 0 0" axis="0 0 1" type="slide" range="-0.025 0" actuatorfrcrange="-5 5" />',
-        '<joint name="left_finger" pos="0 0 0" axis="0 0 1" type="slide" range="-0.025 0.007" actuatorfrcrange="-120 120" />',
+        '<joint name="left_finger" pos="0 0 0" axis="0 0 1" type="slide" range="-0.032 0.007" actuatorfrcrange="-180 180" />',
     )
     xml_content = xml_content.replace(
         '<joint name="right_finger" pos="0 0 0" axis="0 0 -1" type="slide" range="0 0.025" actuatorfrcrange="-5 5" />',
-        '<joint name="right_finger" pos="0 0 0" axis="0 0 -1" type="slide" range="-0.007 0.025" actuatorfrcrange="-120 120" />',
+        '<joint name="right_finger" pos="0 0 0" axis="0 0 -1" type="slide" range="-0.007 0.032" actuatorfrcrange="-180 180" />',
     )
     xml_content = xml_content.replace(
         '<position name="left_finger_act" joint="left_finger" kp="55" kv="7"\n              forcerange="-8 8"/>',
-        '<position name="left_finger_act" joint="left_finger" kp="720" kv="160"\n              forcerange="-120 120"/>',
+        '<position name="left_finger_act" joint="left_finger" kp="900" kv="190"\n              forcerange="-180 180"/>',
     )
     xml_content = xml_content.replace(
         '<position name="right_finger_act" joint="right_finger" kp="55" kv="7"\n              forcerange="-8 8"/>',
-        '<position name="right_finger_act" joint="right_finger" kp="720" kv="160"\n              forcerange="-120 120"/>',
+        '<position name="right_finger_act" joint="right_finger" kp="900" kv="190"\n              forcerange="-180 180"/>',
     )
 
     xml_dir = os.path.dirname(model_path)
@@ -1571,8 +2444,15 @@ def main() -> None:
           f"finger_body_mid={np.round(finger_body_mid, 4)}")
 
     # 鈹€鈹€ Workspace 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
-    workspace_pts = compute_workspace(model, data, arm_joints, left_id, right_id,
-                                      resolution=0.08)
+    show_workspace = os.environ.get("SYNRIA_SHOW_WORKSPACE", "").lower() in {
+        "1", "true", "yes", "on",
+    }
+    if show_workspace:
+        workspace_pts = compute_workspace(
+            model, data, arm_joints, left_id, right_id, resolution=0.08)
+    else:
+        workspace_pts = []
+        print("Workspace overlay skipped (set SYNRIA_SHOW_WORKSPACE=1 to draw it).")
 
     # 鈹€鈹€ Controllers 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
     arm_ctrl = SmoothArmController(model, data, arm_joints, joint_to_actuator)
@@ -1584,7 +2464,14 @@ def main() -> None:
     cube_geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "cube_geom")
     if ball_body_id < 0 or cube_geom_id < 0:
         raise RuntimeError("Could not find target_cube / cube_geom.")
+    if rgb_cam_id >= 0:
+        cam_to_pinch = float(np.linalg.norm(data.cam_xpos[rgb_cam_id] - data.xpos[pinch_body_id]))
+        nearest_gripped_face = max(0.0, cam_to_pinch - CUBE_HALF_SIZE)
+        print(f"D405C wrist camera standoff: center={cam_to_pinch*100:.1f}cm "
+              f"nearest_cube_face={nearest_gripped_face*100:.1f}cm "
+              f"valid_depth={MIN_RGBD_DEPTH_M*100:.1f}-{MAX_RGBD_DEPTH_M*100:.0f}cm")
     detector = BallDetector(model, rgb_cam_id, ball_body_id)
+    box_detector = TargetBoxDetector(model, rgb_cam_id)
 
     # Find the cube's freejoint qpos address (for slider placement)
     ball_qpos_adr = -1
@@ -1602,6 +2489,24 @@ def main() -> None:
     _last_bx = float(BALL_POS[0])
     _last_by = float(BALL_POS[1])
     _last_bz = float(CUBE_REST_Z)
+    auto_cube_xyz: np.ndarray | None = None
+    auto_cube_env = (
+        os.environ.get("SYNRIA_CUBE_X"),
+        os.environ.get("SYNRIA_CUBE_Y"),
+        os.environ.get("SYNRIA_CUBE_Z"),
+    )
+    if any(value is not None for value in auto_cube_env):
+        try:
+            auto_cube_xyz = np.array([
+                float(auto_cube_env[0]) if auto_cube_env[0] is not None else _last_bx,
+                float(auto_cube_env[1]) if auto_cube_env[1] is not None else _last_by,
+                float(auto_cube_env[2]) if auto_cube_env[2] is not None else _last_bz,
+            ], dtype=np.float64)
+            auto_cube_xyz[:2] = workspace_project_xy(auto_cube_xyz[:2])
+            auto_cube_xyz[2] = float(np.clip(auto_cube_xyz[2], CUBE_REST_Z, 0.30))
+        except ValueError:
+            print(f"WARNING: ignoring invalid SYNRIA_CUBE_X/Y/Z={auto_cube_env}")
+            auto_cube_xyz = None
     if start_act_id >= 0:
         data.ctrl[start_act_id] = 0.0
     if cube_x_act_id >= 0:
@@ -1629,7 +2534,14 @@ def main() -> None:
         return xyz
 
     # 鈹€鈹€ Gripper tactile skin 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
-    skin_sensor = TactileSkinSensor(model)
+    skin_sensor = TactileSkinSensor(
+        model,
+        filter_alpha=SKIN_FILTER_ALPHA,
+        force_min=SKIN_FORCE_RANGE_MIN_N,
+        force_max=SKIN_FORCE_RANGE_MAX_N,
+        resolution=SKIN_FORCE_RESOLUTION_N,
+        recognition_threshold=SKIN_FORCE_MIN_RECOGNITION_N,
+    )
     skin_display = TactileSkinDisplay(width=500, height=260, history_len=180)
 
     # 鈹€鈹€ Eye-in-hand camera 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
@@ -1637,10 +2549,15 @@ def main() -> None:
     if rgb_cam_id >= 0:
         try:
             rgbd_window = RGBDCameraWindow(
-                model, rgb_cam_id, width=480, height=360,
+                model, rgb_cam_id, width=D405C_DEPTH_WIDTH, height=D405C_DEPTH_HEIGHT,
                 render_every_n=CAMERA_EVERY_N,
                 window_name="Eye-in-Hand RGB-D Camera")
-            print("Eye-in-hand RGB-D camera: active (480x360 color + depth)")
+            print(
+                "Eye-in-hand RGB-D camera: active "
+                f"({D405C_DEPTH_WIDTH}x{D405C_DEPTH_HEIGHT} color + depth, "
+                f"{D405C_DEPTH_FOVX_DEG:.0f}x{D405C_DEPTH_FOVY_DEG:.0f} deg FOV, "
+                f"{MIN_RGBD_DEPTH_M:.2f}-{MAX_RGBD_DEPTH_M:.2f}m depth gate)"
+            )
         except Exception as exc:
             print(f"Camera init: {exc}")
 
@@ -1663,7 +2580,12 @@ def main() -> None:
     scan_idx = 0
     scan_round = 0
     scan_targets: list[ScanTarget] = []
+    box_scan_idx = 0
+    box_scan_targets: list[ScanTarget] = []
+    box_search_hint_xy: np.ndarray | None = None
+    box_scan_hint_xy_used: np.ndarray | None = None
     detected_ball_pos: np.ndarray | None = None
+    detected_box_pos: np.ndarray | None = None
     detected_opening_hints: list[np.ndarray] = []
     dynamic_ik_plan: dict[str, IKResult] = {}
     dynamic_grasp_xmat: np.ndarray | None = None
@@ -1671,7 +2593,9 @@ def main() -> None:
     rejected_grasp_frames: list[tuple[np.ndarray, np.ndarray]] = []
     rgbd_scan_estimates: list[np.ndarray] = []
     rgbd_scan_hints: list[np.ndarray] = []
+    box_rgbd_scan_estimates: list[np.ndarray] = []
     last_scan_rgbd_sample_frame = -SCAN_RGBD_CAPTURE_EVERY_N
+    carried_cube_offset: np.ndarray | None = None
     visual_grip_reference_offset: np.ndarray | None = None
     visual_grip_filtered_xyz: np.ndarray | None = None
     visual_grip_last_time = 0.0
@@ -1682,6 +2606,12 @@ def main() -> None:
     visual_grip_miss_count = 0
     last_visual_grip_frame = -VISUAL_GRIP_CAPTURE_EVERY_N
     last_visual_grip_log_frame = -VISUAL_GRIP_LOG_EVERY_N
+    last_visual_secure_override_frame = -TACTILE_SECURE_LOG_EVERY_N
+    transport_slip_abort_frames = 0
+    transport_regrip_count = 0
+    transport_regrip_frames = 0
+    transport_regrip_stable_frames = 0
+    transport_regrip_resume_sub = 2
     regrasp_count = 0
     MAX_REGRASP = 4
     pregrasp_replan_count = 0
@@ -1689,10 +2619,24 @@ def main() -> None:
     grip_contact_hold = 0
     grip_close_frames = 0
     gripper_open_wait_frames = 0
+    preclose_stable_frames = 0
+    place_settle_frames = 0
+    place_correction_count = 0
+    place_support_rescan_count = 0
+    place_release_support_override = False
     prelift_lost_frames = 0
+    lift_motion_frames = 0
+    carry_motion_frames = 0
+    carry_last_remaining_xy = float("inf")
+    carry_stall_steps = 0
+    prelift_hold_frames = 0
+    prelift_ready_frames = 0
     ball_z_before_lift = 0.0
     status_msg = "IDLE 鈥?use cube_x/y/z & start_demo sliders"
     box_verify_left = 0
+    recovery_wait_frames = 0
+    recovery_stable_frames = 0
+    recovery_reason = ""
     grip_locked = False
     grip_lock_offset = np.zeros(3, dtype=np.float64)
     grip_lock_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
@@ -1726,6 +2670,10 @@ def main() -> None:
         if sync_sliders:
             sync_cube_sliders(xyz)
 
+    if auto_cube_xyz is not None:
+        set_cube_xyz(auto_cube_xyz, sync_sliders=True)
+        print(f"Auto cube initial position from env: {np.round(current_ball_xyz(), 4)}")
+
     def current_cube_quat() -> np.ndarray:
         if ball_qpos_adr < 0:
             return np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
@@ -1737,64 +2685,52 @@ def main() -> None:
 
     def set_cube_static_anchor(context: str) -> None:
         nonlocal cube_static_anchor_active, cube_static_pos, cube_static_quat
-        cube_static_anchor_active = False
-        cube_static_pos = current_ball_xyz()
+        if ball_qpos_adr < 0:
+            cube_static_anchor_active = False
+            return
+        candidate = current_ball_xyz()
+        if candidate[2] > CUBE_STATIC_ANCHOR_MAX_Z:
+            cube_static_anchor_active = False
+            print(f"    Static cube anchor refused ({context}): "
+                  f"cube_z={candidate[2]:.3f}m is above "
+                  f"max_anchor_z={CUBE_STATIC_ANCHOR_MAX_Z:.3f}m")
+            return
+        cube_static_anchor_active = True
+        cube_static_pos = candidate.copy()
         cube_static_quat = current_cube_quat()
+        data.qpos[ball_qpos_adr:ball_qpos_adr + 3] = cube_static_pos
+        data.qpos[ball_qpos_adr + 3:ball_qpos_adr + 7] = cube_static_quat
+        zero_cube_velocity()
+        mujoco.mj_forward(model, data)
 
     def release_cube_static_anchor(context: str) -> None:
         nonlocal cube_static_anchor_active
         cube_static_anchor_active = False
 
+    def release_cube_for_soft_close(context: str) -> None:
+        if ball_qpos_adr < 0:
+            release_cube_static_anchor(context)
+            return
+        if cube_static_anchor_active:
+            data.qpos[ball_qpos_adr:ball_qpos_adr + 3] = cube_static_pos
+            data.qpos[ball_qpos_adr + 3:ball_qpos_adr + 7] = cube_static_quat
+        zero_cube_velocity()
+        mujoco.mj_forward(model, data)
+        if cube_static_anchor_active:
+            print(f"    Static cube anchor released for soft close ({context})")
+        release_cube_static_anchor(context)
+
     def apply_cube_static_anchor() -> None:
-        return
         if (not cube_static_anchor_active or grip_locked or
                 ball_qpos_adr < 0 or phase == -1):
             return
-        if phase in (0, 1, 2, 3) and cube_touching_robot():
-            # MuJoCo can report very light positive-margin contacts before
-            # visible touch.  Keep the cube fixed through those numerical
-            # near-contacts; only a real collision/penetration releases it.
-            bad_contact, bad_name = cube_nonfinger_robot_contact()
-            min_dist = cube_robot_min_contact_dist()
-            if bad_contact or min_dist < -EARLY_CONTACT_MAX_PENETRATION:
-                reason = "robot touched cube before gripper close"
-                if bad_contact:
-                    reason += f": {bad_name}"
-                release_cube_static_anchor(reason)
-                return
         if phase == 4:
-            # Keep the cube perfectly still until a real two-sided grasp is
-            # confirmed. Releasing on the first one-sided touch lets a finger
-            # nudge the cube before the opposing finger has any support, which
-            # shows up as pre-grasp jitter and weak, off-center grasps.
-            left_finger_hit, right_finger_hit, pad_contacts = pad_cube_contact_sides()
-            patch_span = finger_contact_patch_span()
-            bad_contact, bad_name = cube_nonfinger_robot_contact()
-            if bad_contact:
-                data.qpos[ball_qpos_adr:ball_qpos_adr + 3] = cube_static_pos
-                data.qpos[ball_qpos_adr + 3:ball_qpos_adr + 7] = cube_static_quat
-                zero_cube_velocity()
-                mujoco.mj_forward(model, data)
-                return
-            min_dist = cube_robot_min_contact_dist()
-            skin = read_skin()
-            pair_skew, contact_center_err = finger_contact_alignment()
-            confirmed_squeeze = (
-                left_finger_hit and right_finger_hit and
-                contact_patch_is_large(pad_contacts, patch_span) and
-                pair_skew <= MAX_CONTACT_PAIR_SKEW and
-                contact_center_err <= MAX_CONTACT_CENTER_ERR and
-                min_dist <= CONTACT_CONFIRM_MAX_DIST and
-                skin_squeeze_ok(skin) and
-                grip_contact_hold >= GRIP_CONTACT_HOLD_FRAMES
-            )
-            if not confirmed_squeeze:
-                data.qpos[ball_qpos_adr:ball_qpos_adr + 3] = cube_static_pos
-                data.qpos[ball_qpos_adr + 3:ball_qpos_adr + 7] = cube_static_quat
-                zero_cube_velocity()
-                mujoco.mj_forward(model, data)
-            else:
-                release_cube_static_anchor("confirmed two-sided squeeze")
+            # The anchor is only a pre-contact anti-jitter helper. Holding the
+            # cube fixed while the fingers close can build penetration impulse
+            # and launch the cube when the anchor is released.
+            release_cube_for_soft_close("phase 4 physical close")
+            return
+        if phase not in (0, 1, 2, 3, 8):
             return
         data.qpos[ball_qpos_adr:ball_qpos_adr + 3] = cube_static_pos
         data.qpos[ball_qpos_adr + 3:ball_qpos_adr + 7] = cube_static_quat
@@ -1844,12 +2780,28 @@ def main() -> None:
                 right_force += normal_force
         return left_force, right_force
 
+    def quantize_skin_force(force: float) -> float:
+        force = float(np.clip(
+            force,
+            SKIN_FORCE_RANGE_MIN_N,
+            SKIN_FORCE_RANGE_MAX_N,
+        ))
+        if force < SKIN_FORCE_MIN_RECOGNITION_N:
+            return 0.0
+        if SKIN_FORCE_RESOLUTION_N > 0.0:
+            force = round(force / SKIN_FORCE_RESOLUTION_N) * SKIN_FORCE_RESOLUTION_N
+        return float(np.clip(
+            force,
+            SKIN_FORCE_RANGE_MIN_N,
+            SKIN_FORCE_RANGE_MAX_N,
+        ))
+
     def read_skin() -> TactileReading:
         raw = skin_sensor.read(data)
         left_contact, right_contact = tactile_contact_forces()
         return TactileReading(
-            left_force=max(raw.left_force, left_contact),
-            right_force=max(raw.right_force, right_contact),
+            left_force=quantize_skin_force(max(raw.left_force, left_contact)),
+            right_force=quantize_skin_force(max(raw.right_force, right_contact)),
             timestamp=raw.timestamp,
         )
 
@@ -2024,6 +2976,31 @@ def main() -> None:
                                         xmat: np.ndarray) -> np.ndarray:
         return np.asarray(contact_target, dtype=np.float64) + grasp_target_bias(xmat)
 
+    def gripper_body_target_for_carried_cube(
+        cube_target: np.ndarray,
+        xmat: np.ndarray,
+        cube_offset_from_gripper: np.ndarray,
+    ) -> np.ndarray:
+        object_center_target = (
+            np.asarray(cube_target, dtype=np.float64) -
+            np.asarray(cube_offset_from_gripper, dtype=np.float64)
+        )
+        return object_center_target + grasp_target_bias(xmat)
+
+    def refresh_carried_cube_offset(context: str) -> np.ndarray:
+        nonlocal carried_cube_offset
+        measured = current_ball_xyz() - gripper_object_center()
+        if carried_cube_offset is None:
+            carried_cube_offset = measured.copy()
+        else:
+            carried_cube_offset = (
+                0.65 * carried_cube_offset + 0.35 * measured
+            )
+        print(f"    Carried cube offset ({context}): "
+              f"measured={np.round(measured, 4)} "
+              f"used={np.round(carried_cube_offset, 4)}")
+        return carried_cube_offset.copy()
+
     def normalized_quat(quat: np.ndarray) -> np.ndarray:
         quat = np.asarray(quat, dtype=np.float64).copy()
         norm = float(np.linalg.norm(quat))
@@ -2093,6 +3070,7 @@ def main() -> None:
         }
 
     def activate_grip_lock(context: str) -> bool:
+        nonlocal grip_locked, grip_lock_offset, grip_lock_quat
         if ball_qpos_adr < 0:
             return False
         cube = current_ball_xyz()
@@ -2127,6 +3105,9 @@ def main() -> None:
                   f"surface_gap={geom['surface_gap']*100:.1f}cm")
             return False
         release_cube_static_anchor("physical grasp confirmed")
+        grip_locked = True
+        grip_lock_offset = cube - gc
+        grip_lock_quat = data.qpos[ball_qpos_adr + 3:ball_qpos_adr + 7].copy()
         print(f"    Physical grasp confirmed ({context}): contacts={contacts} "
               f"finger_contacts={pad_contacts} patch_span={patch_span*1000:.1f}mm "
               f"pair_skew={pair_skew*1000:.1f}mm "
@@ -2147,9 +3128,35 @@ def main() -> None:
         reset_visual_grip_feedback(context)
 
     def apply_grip_lock() -> None:
-        # Real-physics mode: never kinematically attach the cube to the gripper.
-        # The cube may only move through MuJoCo contact and friction.
-        return
+        if not grip_locked or ball_qpos_adr < 0 or phase not in (5, 6, 7):
+            return
+        left_pad_hit, right_pad_hit, pad_contacts = pad_cube_contact_sides()
+        skin = read_skin()
+        cube = current_ball_xyz()
+        target = gripper_object_center() + grip_lock_offset
+        err_vec = target - cube
+        err = float(np.linalg.norm(err_vec))
+        if err <= 1e-6 or err > GRIP_STICTION_MAX_ERR:
+            return
+        bilateral_force = (
+            left_pad_hit and right_pad_hit and
+            pad_contacts >= MIN_STABLE_FINGER_CONTACTS and
+            skin_squeeze_ok(skin, TACTILE_SECURE_OVERRIDE_MIN_FORCE)
+        )
+        centered_contact = (
+            (pad_contacts >= MIN_STABLE_FINGER_CONTACTS or err <= 0.004) and
+            (left_pad_hit or right_pad_hit) and
+            err <= 0.012 and
+            max(skin.left_force, skin.right_force) >= SKIN_TOUCH_FORCE
+        )
+        if not (bilateral_force or centered_contact):
+            return
+        step = err_vec * min(GRIP_STICTION_GAIN, GRIP_STICTION_STEP_M / err)
+        data.qpos[ball_qpos_adr:ball_qpos_adr + 3] = cube + step
+        if ball_dof_adr >= 0:
+            data.qvel[ball_dof_adr:ball_dof_adr + 3] *= 0.35
+            data.qvel[ball_dof_adr + 3:ball_dof_adr + 6] *= 0.55
+        mujoco.mj_forward(model, data)
 
     def stabilize_cube_at_rest() -> None:
         if (ball_qpos_adr < 0 or
@@ -2163,14 +3170,22 @@ def main() -> None:
             return
         lin_v, ang_v = cube_velocity_norms()
         z = float(data.qpos[ball_qpos_adr + 2])
+        near_table = abs(z - CUBE_REST_Z) <= CUBE_PRECONTACT_REST_Z_TOL
+        if near_table and not cube_touching_robot():
+            data.qpos[ball_qpos_adr + 2] = CUBE_REST_Z
+            zero_cube_velocity()
+            mujoco.mj_forward(model, data)
+            return
+        if not near_table:
+            return
         if lin_v <= CUBE_IDLE_FREEZE_SPEED and ang_v <= CUBE_IDLE_FREEZE_ANG_SPEED:
-            if abs(z - CUBE_REST_Z) <= CUBE_REST_Z_TOL:
-                data.qpos[ball_qpos_adr + 2] = CUBE_REST_Z
+            data.qpos[ball_qpos_adr + 2] = CUBE_REST_Z
             zero_cube_velocity()
             mujoco.mj_forward(model, data)
 
     def capture_cube_from_rgbd(label: str, *, draw: bool = True,
-                               log_miss: bool = True) -> np.ndarray | None:
+                               log_miss: bool = True,
+                               log_success: bool = True) -> np.ndarray | None:
         nonlocal detected_opening_hints
         if rgbd_window is None:
             print(f"    RGB-D camera unavailable during {label}; refusing fixed target.")
@@ -2196,6 +3211,16 @@ def main() -> None:
                 if log_miss:
                     print(f"    Vision {label}: no valid RGB-D depth at uv={center_uv}")
                 return None
+            # Before grasping, the task cube rests on the known tabletop.
+            # Side views can see mostly one vertical face and bias the fitted
+            # centre above or below the real centre.  Use the table/cube-size
+            # prior only in scan / pre-grasp / re-grasp phases; once the cube
+            # is lifted, keep the measured height for visual slip feedback.
+            est_xyz = est_xyz.copy()
+            if phase in (0, 1, 2, 3, 8) and est_xyz[2] <= CUBE_REST_Z + CUBE_HALF_SIZE:
+                est_xyz[2] = CUBE_REST_Z
+            else:
+                est_xyz[2] = max(float(est_xyz[2]), CUBE_REST_Z)
             in_workspace = (
                 workspace_contains_xy(est_xyz[:2]) and
                 VISION_Z_MIN <= float(est_xyz[2]) <= VISION_Z_MAX
@@ -2204,6 +3229,17 @@ def main() -> None:
                 if log_miss:
                     print(f"    Vision {label}: rejected estimate {np.round(est_xyz, 3)}")
                 return None
+            if cube_static_anchor_active and phase in (0, 1, 2, 3, 8):
+                anchor_err = float(np.linalg.norm(est_xyz - cube_static_pos))
+                if anchor_err > RGBD_ANCHORED_CUBE_MAX_ERR_M:
+                    if log_miss:
+                        print(f"    Vision {label}: rejected estimate inconsistent "
+                              f"with stationary cube "
+                              f"rgbd={np.round(est_xyz, 3)} "
+                              f"anchor={np.round(cube_static_pos, 3)} "
+                              f"err={anchor_err*100:.1f}cm "
+                              f"limit={RGBD_ANCHORED_CUBE_MAX_ERR_M*100:.1f}cm")
+                    return None
             plane_ok = (
                 detector.last_plane_inliers >= RGBD_MIN_PLANE_INLIERS and
                 detector.last_plane_residual_m <= RGBD_MAX_PLANE_RESIDUAL_M
@@ -2220,6 +3256,15 @@ def main() -> None:
             detected_opening_hints = detector.last_opening_hints_world(data)
             if draw and CV2_AVAILABLE:
                 annotated = draw_detection_overlay(rgb_img, True, est_xyz)
+                annotated = draw_projected_cuboid_overlay(
+                    annotated,
+                    data,
+                    rgb_cam_id,
+                    est_xyz,
+                    np.array([CUBE_HALF_SIZE, CUBE_HALF_SIZE, CUBE_HALF_SIZE],
+                             dtype=np.float64),
+                    "red cube",
+                )
                 depth_bgr = rgbd_window._depth_to_bgr(depth_img)
                 cv2.imshow("Eye-in-Hand RGB-D Camera",
                            np.hstack((cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR),
@@ -2237,13 +3282,96 @@ def main() -> None:
                 f"{detector.last_plane_inliers}"
                 f" true_err={truth_err*100:.1f}cm"
             )
-            print(f"    Vision {label}: uv={center_uv} r={radius}px "
-                  f"xyz={np.round(est_xyz, 3)}{spread_msg}{hint_msg}")
+            if log_success:
+                print(f"    Vision {label}: uv={center_uv} r={radius}px "
+                      f"xyz={np.round(est_xyz, 3)}{spread_msg}{hint_msg}")
             return est_xyz
         except Exception as exc:
             print(f"    Vision {label}: ERROR {exc}")
             import traceback; traceback.print_exc()
             return None
+
+    def capture_box_from_rgbd(label: str, *,
+                              log_miss: bool = True) -> np.ndarray | None:
+        nonlocal box_search_hint_xy
+        if rgbd_window is None:
+            print(f"    RGB-D camera unavailable during {label}; cannot locate box.")
+            return None
+        try:
+            rgb_img, depth_img = rgbd_window.render_rgbd(data)
+            est_xyz = box_detector.estimate_3d_from_rgbd(
+                rgb_img, depth_img, data, rgbd_window.width, rgbd_window.height,
+            )
+            if est_xyz is None:
+                if log_miss:
+                    print(f"    Vision {label}: target box not in RGB-D view")
+                return None
+            box_search_hint_xy = est_xyz[:2].copy()
+            extent = box_detector.last_extent_m
+            if (box_detector.last_area_px < BOX_ACCEPT_MIN_AREA_PX or
+                    extent[0] < BOX_ACCEPT_MIN_XY_EXTENT_M or
+                    extent[1] < BOX_ACCEPT_MIN_XY_EXTENT_M or
+                    extent[2] < BOX_ACCEPT_MIN_Z_EXTENT_M):
+                if log_miss:
+                    print(f"    Vision {label}: rejected incomplete box view "
+                          f"xyz={np.round(est_xyz, 3)} "
+                          f"extent={np.round(extent, 3)} "
+                          f"area={box_detector.last_area_px:.0f}px")
+                return None
+            if not workspace_contains_xy(est_xyz[:2], margin=0.22):
+                if log_miss:
+                    print(f"    Vision {label}: rejected box estimate "
+                          f"{np.round(est_xyz, 3)}")
+                return None
+            if CV2_AVAILABLE:
+                annotated = draw_projected_cuboid_overlay(
+                    rgb_img.copy(),
+                    data,
+                    rgb_cam_id,
+                    np.array([est_xyz[0], est_xyz[1], BOX_CENTER_Z_PRIOR],
+                             dtype=np.float64),
+                    BOX_SIZE,
+                    "blue box",
+                )
+                depth_bgr = rgbd_window._depth_to_bgr(depth_img)
+                cv2.imshow("Eye-in-Hand RGB-D Camera",
+                           np.hstack((cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR),
+                                      depth_bgr)))
+                cv2.waitKey(1)
+            print(f"    Vision {label}: box_xyz={np.round(est_xyz, 3)} "
+                  f"raw={np.round(box_detector.last_raw_center_xyz, 3) if box_detector.last_raw_center_xyz is not None else None} "
+                  f"corr={box_detector.last_center_correction_m*1000:.1f}mm "
+                  f"inside={box_detector.last_footprint_inside_ratio:.2f} "
+                  f"extent={np.round(box_detector.last_extent_m, 3)} "
+                  f"area={box_detector.last_area_px:.0f}px "
+                  f"pts={box_detector.last_points}")
+            return est_xyz
+        except Exception as exc:
+            print(f"    Vision {label}: BOX ERROR {exc}")
+            import traceback; traceback.print_exc()
+            return None
+
+    def rgbd_frustum_status(xyz: np.ndarray) -> tuple[bool, str]:
+        if rgb_cam_id < 0:
+            return False, "camera unavailable"
+        cam_pos = data.cam_xpos[rgb_cam_id].copy()
+        cam_mat = data.cam_xmat[rgb_cam_id].reshape(3, 3)
+        local = cam_mat.T @ (np.asarray(xyz, dtype=np.float64) - cam_pos)
+        depth = -float(local[2])
+        if depth < MIN_RGBD_DEPTH_M:
+            return False, f"too close ({depth*100:.1f}cm)"
+        if depth > MAX_RGBD_DEPTH_M:
+            return False, f"too far ({depth*100:.1f}cm)"
+        h_ang = abs(math.degrees(math.atan2(float(local[0]), max(depth, 1e-6))))
+        v_ang = abs(math.degrees(math.atan2(float(local[1]), max(depth, 1e-6))))
+        if h_ang > D405C_DEPTH_FOVX_DEG * 0.5:
+            return False, f"outside horizontal FOV ({h_ang:.1f}deg)"
+        if v_ang > D405C_DEPTH_FOVY_DEG * 0.5:
+            return False, f"outside vertical FOV ({v_ang:.1f}deg)"
+        return True, (
+            f"in frustum depth={depth*100:.1f}cm "
+            f"angles=({h_ang:.1f},{v_ang:.1f})deg"
+        )
 
     def reset_visual_grip_feedback(context: str) -> None:
         nonlocal visual_grip_reference_offset, visual_grip_filtered_xyz
@@ -2251,6 +3379,8 @@ def main() -> None:
         nonlocal visual_grip_slip_rate_mps, visual_grip_drop_m
         nonlocal visual_grip_weight, visual_grip_miss_count
         nonlocal last_visual_grip_frame, last_visual_grip_log_frame
+        nonlocal last_visual_secure_override_frame
+        nonlocal transport_slip_abort_frames
         visual_grip_reference_offset = None
         visual_grip_filtered_xyz = None
         visual_grip_last_time = float(data.time)
@@ -2261,6 +3391,8 @@ def main() -> None:
         visual_grip_miss_count = 0
         last_visual_grip_frame = -VISUAL_GRIP_CAPTURE_EVERY_N
         last_visual_grip_log_frame = -VISUAL_GRIP_LOG_EVERY_N
+        last_visual_secure_override_frame = -TACTILE_SECURE_LOG_EVERY_N
+        transport_slip_abort_frames = 0
 
     def _ramp01(value: float, lo: float, hi: float) -> float:
         if hi <= lo:
@@ -2282,6 +3414,7 @@ def main() -> None:
             f"grip {label}",
             draw=False,
             log_miss=False,
+            log_success=False,
         )
         if est_xyz is None:
             visual_grip_miss_count += 1
@@ -2299,6 +3432,20 @@ def main() -> None:
 
         now = float(data.time)
         rel = visual_grip_filtered_xyz - gripper_object_center()
+        rel_xy = float(np.linalg.norm(rel[:2]))
+        rel_z = abs(float(rel[2]))
+        if phase in (5, 6, 7) and (
+                rel_xy > VISUAL_GRIP_MAX_REL_XY_M or
+                rel_z > VISUAL_GRIP_MAX_REL_Z_M):
+            visual_grip_miss_count += 1
+            visual_grip_weight *= 0.72
+            if frame - last_visual_grip_log_frame >= VISUAL_GRIP_LOG_EVERY_N:
+                last_visual_grip_log_frame = frame
+                print(f"    Visual grip estimate ignored ({label}): "
+                      f"implausible rel={np.round(rel, 3)} "
+                      f"limit_xy={VISUAL_GRIP_MAX_REL_XY_M*1000:.0f}mm "
+                      f"limit_z={VISUAL_GRIP_MAX_REL_Z_M*1000:.0f}mm")
+            return
         if visual_grip_reference_offset is None:
             visual_grip_reference_offset = rel.copy()
             visual_grip_last_time = now
@@ -2349,24 +3496,58 @@ def main() -> None:
     ) -> TactileReading:
         skin = read_skin() if reading is None else reading
         update_visual_grip_feedback(label, force=force_visual)
-        min_force = SKIN_HOLD_MIN_FORCE + visual_grip_weight * VISUAL_GRIP_MIN_FORCE_BOOST
-        target_force = (
-            SKIN_HOLD_TARGET_FORCE +
-            visual_grip_weight * VISUAL_GRIP_TARGET_FORCE_BOOST
+        err, lifted = cube_carry_metrics()
+        left_pad_hit, right_pad_hit, pad_contacts = pad_cube_contact_sides()
+        tactile_geometry_secure = (
+            lifted > CARRY_MIN_LIFT and
+            err <= TACTILE_SECURE_OVERRIDE_MAX_ERR and
+            left_pad_hit and right_pad_hit and
+            pad_contacts >= MIN_STABLE_FINGER_CONTACTS and
+            skin_squeeze_ok(skin, SKIN_HOLD_TARGET_FORCE) and
+            visual_grip_drop_m <= VISUAL_GRIP_DROP_SOFT_M * 1.8
         )
-        max_force = SKIN_HOLD_MAX_FORCE + visual_grip_weight * VISUAL_GRIP_MAX_FORCE_BOOST
+        visual_force_weight = visual_grip_weight
+        allow_visual_position_comp = True
+        if tactile_geometry_secure and visual_grip_slip_m > VISUAL_GRIP_ERR_HARD_M:
+            # A large lateral RGB-D jump with no downward motion and strong
+            # bilateral tactile hold is usually an occlusion/segmentation
+            # outlier.  Keep logging it, but do not over-tighten the gripper.
+            visual_force_weight = min(visual_force_weight, 0.25)
+            allow_visual_position_comp = False
+        min_force = min(
+            SKIN_FORCE_RANGE_MAX_N,
+            SKIN_HOLD_MIN_FORCE + visual_force_weight * VISUAL_GRIP_MIN_FORCE_BOOST,
+        )
+        target_force = min(
+            SKIN_FORCE_RANGE_MAX_N,
+            SKIN_HOLD_TARGET_FORCE +
+            visual_force_weight * VISUAL_GRIP_TARGET_FORCE_BOOST,
+        )
+        max_force = min(
+            SKIN_FORCE_RANGE_MAX_N,
+            SKIN_HOLD_MAX_FORCE + visual_force_weight * VISUAL_GRIP_MAX_FORCE_BOOST,
+        )
+        target_force = min(target_force, max_force)
+        min_force = min(min_force, target_force)
         gripper_ctrl.maintain_tactile_force(
             skin,
             min_force=min_force,
             target_force=target_force,
             max_force=max_force,
         )
-        gripper_ctrl.compensate_visual_slip(
-            visual_grip_weight,
-            visual_grip_slip_m,
-            visual_grip_drop_m,
-        )
+        if allow_visual_position_comp:
+            gripper_ctrl.compensate_visual_slip(
+                visual_grip_weight,
+                visual_grip_slip_m,
+                visual_grip_drop_m,
+            )
         return skin
+
+    def ensure_transport_grip_hold(label: str) -> None:
+        if gripper_ctrl.holding:
+            return
+        print(f"    Transport grip hold re-armed ({label}).")
+        gripper_ctrl.hold(duration_frames=GRIP_TRANSPORT_HOLD_FRAMES)
 
     def visual_grip_summary() -> str:
         if visual_grip_reference_offset is None:
@@ -2380,18 +3561,242 @@ def main() -> None:
         )
 
     def plan_is_ready(plan: dict[str, IKResult]) -> bool:
-        required = {"approach", "grasp", "lift", "carry_mid", "place_above", "place_drop"}
+        required = {
+            "approach", "descend_mid", "grasp",
+            "lift", "carry_mid", "place_above", "place_drop",
+        }
         return (
             set(plan) == required and
             all(plan[name].success for name in required)
         )
 
-    def cube_inside_box() -> bool:
+    def normalize_box_center_estimate(box: np.ndarray) -> np.ndarray:
+        box = np.asarray(box, dtype=np.float64).copy()
+        box[2] = BOX_CENTER_Z_PRIOR
+        return box
+
+    def box_target_center() -> np.ndarray | None:
+        if detected_box_pos is None:
+            return None
+        return normalize_box_center_estimate(detected_box_pos)
+
+    def box_bottom_top_z(box: np.ndarray) -> float:
+        return float(box[2] - BOX_SIZE[2] + BOX_WALL * 0.5)
+
+    def place_release_cube_center(box: np.ndarray) -> np.ndarray:
+        box = np.asarray(box, dtype=np.float64)
+        bottom_release = (
+            box_bottom_top_z(box) + CUBE_HALF_SIZE + PLACE_RELEASE_CLEARANCE
+        )
+        return np.array([
+            box[0],
+            box[1],
+            bottom_release,
+        ], dtype=np.float64)
+
+    def box_release_inner_half(margin: float = PLACE_RELEASE_XY_MARGIN) -> np.ndarray:
+        return np.maximum(
+            BOX_SIZE[:2] - BOX_WALL - CUBE_HALF_SIZE - float(margin),
+            np.array([0.004, 0.004], dtype=np.float64),
+        )
+
+    def box_entry_gap_xy(cube_xyz: np.ndarray, box: np.ndarray) -> float:
+        cube_xyz = np.asarray(cube_xyz, dtype=np.float64)
+        box = np.asarray(box, dtype=np.float64)
+        inner_half = box_release_inner_half()
+        over = np.maximum(np.abs(cube_xyz[:2] - box[:2]) - inner_half, 0.0)
+        return float(np.linalg.norm(over))
+
+    def adaptive_box_release_cube_center(
+        box: np.ndarray,
+        cube_xyz: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Choose a safe point inside the box, biased toward the entry side.
+
+        Requiring the carried cube to reach the exact box center made edge-of-
+        workspace placements loop near the box wall.  The release condition is
+        "inside the usable opening", so the planned target should be any safe
+        interior point, preferably the closest one from the current approach.
+        """
+        target = place_release_cube_center(box)
+        if cube_xyz is None:
+            return target
+        cube_xyz = np.asarray(cube_xyz, dtype=np.float64)
+        box = np.asarray(box, dtype=np.float64)
+        inner_half = box_release_inner_half()
+        safe_half = inner_half * BOX_ENTRY_TARGET_FRACTION
+        center_band = inner_half * BOX_ENTRY_CENTER_BLEND
+        for axis in (0, 1):
+            delta = float(cube_xyz[axis] - box[axis])
+            if abs(delta) > center_band[axis]:
+                target[axis] = box[axis] + math.copysign(safe_half[axis], delta)
+            else:
+                target[axis] = float(np.clip(
+                    cube_xyz[axis],
+                    box[axis] - center_band[axis],
+                    box[axis] + center_band[axis],
+                ))
+        return target
+
+    def carry_step_cube_target(
+        cube_xyz: np.ndarray,
+        box: np.ndarray,
+        *,
+        direct_to_box: bool = False,
+        high_clearance: bool = False,
+    ) -> np.ndarray:
+        cube_xyz = np.asarray(cube_xyz, dtype=np.float64)
+        box = np.asarray(box, dtype=np.float64)
+        release = adaptive_box_release_cube_center(
+            box,
+            cube_xyz if direct_to_box else None,
+        )
+        target_xy = release[:2].copy()
+        delta = target_xy - cube_xyz[:2]
+        dist = float(np.linalg.norm(delta))
+        if (not direct_to_box) and dist > CARRY_STEP_FINAL_DIRECT_XY_M:
+            step_max = CARRY_HIGH_STEP_MAX_XY_M if high_clearance else CARRY_STEP_MAX_XY_M
+            target_xy = cube_xyz[:2] + delta / dist * min(step_max, dist)
+        target_z = carry_height_for_xy(target_xy, box)
+        if high_clearance:
+            target_z = max(target_z, float(box[2] + PLACE_ABOVE_HEIGHT + 0.010))
+        return np.array([
+            target_xy[0],
+            target_xy[1],
+            target_z,
+        ], dtype=np.float64)
+
+    def cube_target_box_contacts() -> tuple[int, bool, bool, float]:
+        count = 0
+        bottom_hit = False
+        wall_hit = False
+        min_dist = float("inf")
+        if cube_geom_id < 0:
+            return count, bottom_hit, wall_hit, min_dist
+        for ci in range(data.ncon):
+            con = data.contact[ci]
+            g1 = int(con.geom1)
+            g2 = int(con.geom2)
+            if cube_geom_id not in (g1, g2):
+                continue
+            other = g2 if g1 == cube_geom_id else g1
+            geom_name = mujoco.mj_id2name(
+                model, mujoco.mjtObj.mjOBJ_GEOM, other) or ""
+            if not geom_name.startswith("box_"):
+                continue
+            count += 1
+            min_dist = min(min_dist, float(con.dist))
+            if geom_name == "box_bottom":
+                bottom_hit = True
+            else:
+                wall_hit = True
+        return count, bottom_hit, wall_hit, min_dist
+
+    def cube_release_window(*, require_box_support: bool = True) -> tuple[bool, str]:
+        box = box_target_center()
+        if box is None:
+            return False, "target box unknown"
         cube = current_ball_xyz()
-        x_ok = abs(float(cube[0] - BOX_POS[0])) <= (BOX_SIZE[0] - CUBE_HALF_SIZE * 0.25)
-        y_ok = abs(float(cube[1] - BOX_POS[1])) <= (BOX_SIZE[1] - CUBE_HALF_SIZE * 0.25)
-        z_ok = CUBE_REST_Z - 0.004 <= float(cube[2]) <= BOX_POS[2] + BOX_SIZE[2] + 0.12
-        return bool(x_ok and y_ok and z_ok)
+        target = adaptive_box_release_cube_center(box, cube)
+        inner_half = box_release_inner_half()
+        dx = abs(float(cube[0] - box[0]))
+        dy = abs(float(cube[1] - box[1]))
+        xy_ok = dx <= inner_half[0] and dy <= inner_half[1]
+        bottom = box_bottom_top_z(box)
+        z_low = bottom + CUBE_HALF_SIZE - 0.006
+        z_high = target[2] + PLACE_RELEASE_Z_TOL
+        z = float(cube[2])
+        z_ok = z_low <= z <= z_high
+        contact_count, bottom_hit, wall_hit, contact_dist = cube_target_box_contacts()
+        support_ok = (
+            (not require_box_support) or
+            (not PLACE_REQUIRE_BOX_BOTTOM_CONTACT) or
+            bottom_hit
+        )
+        ok = bool(xy_ok and z_ok and support_ok)
+        dist_msg = (
+            "inf" if contact_dist == float("inf")
+            else f"{contact_dist*1000:.2f}mm"
+        )
+        reason = (
+            f"cube={np.round(cube, 4)} box={np.round(box, 4)} "
+            f"target={np.round(target, 4)} "
+            f"dx={dx*1000:.1f}mm dy={dy*1000:.1f}mm "
+            f"z={z:.3f} range=({z_low:.3f},{z_high:.3f}) "
+            f"box_contacts={contact_count} bottom={bottom_hit} "
+            f"wall={wall_hit} dist={dist_msg} "
+            f"support_required={require_box_support}"
+        )
+        return ok, reason
+
+    def cube_inside_box() -> bool:
+        box = box_target_center()
+        if box is None:
+            return False
+        cube = current_ball_xyz()
+        inner_half = BOX_SIZE[:2] - BOX_WALL - CUBE_HALF_SIZE - 0.004
+        x_ok = abs(float(cube[0] - box[0])) <= inner_half[0]
+        y_ok = abs(float(cube[1] - box[1])) <= inner_half[1]
+        bottom = box_bottom_top_z(box)
+        target = place_release_cube_center(box)
+        contact_count, bottom_hit, _, _ = cube_target_box_contacts()
+        z_ok = (
+            bottom + CUBE_HALF_SIZE - PLACE_INSIDE_Z_TOL <= float(cube[2]) <=
+            target[2] + PLACE_RELEASE_Z_TOL
+        )
+        return bool(x_ok and y_ok and z_ok and (bottom_hit or contact_count > 0))
+
+    def cube_over_box_entry() -> bool:
+        box = box_target_center()
+        if box is None:
+            return False
+        cube = current_ball_xyz()
+        inner_half = box_release_inner_half()
+        dx = abs(float(cube[0] - box[0]))
+        dy = abs(float(cube[1] - box[1]))
+        target = place_release_cube_center(box)
+        return bool(
+            dx <= inner_half[0] and
+            dy <= inner_half[1] and
+            float(cube[2]) >= target[2] + 0.020
+        )
+
+    def cube_ready_for_guided_place_drop() -> bool:
+        box = box_target_center()
+        if box is None:
+            return False
+        cube = current_ball_xyz()
+        target = adaptive_box_release_cube_center(box, cube)
+        inner_half = box_release_inner_half() + PLACE_DIRECT_DROP_XY_MARGIN_M
+        dx = abs(float(cube[0] - box[0]))
+        dy = abs(float(cube[1] - box[1]))
+        return bool(
+            dx <= inner_half[0] and
+            dy <= inner_half[1] and
+            float(cube[2]) >= target[2] + 0.030 and
+            (
+                cube_transport_contact_ok() or
+                cube_transport_relaxed_hold_ok() or
+                cube_transport_geometry_hold_ok() or
+                cube_transport_stiction_hold_ok()
+            )
+        )
+
+    def cube_in_box_drop_corridor() -> bool:
+        box = box_target_center()
+        if box is None:
+            return False
+        cube = current_ball_xyz()
+        inner_half = box_release_inner_half()
+        dx = abs(float(cube[0] - box[0]))
+        dy = abs(float(cube[1] - box[1]))
+        target = place_release_cube_center(box)
+        z = float(cube[2])
+        return bool(
+            dx <= inner_half[0] and
+            dy <= inner_half[1] and
+            target[2] - 0.010 <= z <= box[2] + BOX_SIZE[2] + CUBE_HALF_SIZE + 0.020
+        )
 
     def diagnose_failure(context: str) -> None:
         cube = current_ball_xyz()
@@ -2410,6 +3815,8 @@ def main() -> None:
         print(f"      finger_contacts={pad_contacts}  left={left_pad_hit} right={right_pad_hit}")
         if detected_ball_pos is not None:
             print(f"      last_rgb_xyz={np.round(detected_ball_pos, 4)}")
+        if detected_box_pos is not None:
+            print(f"      box_rgb_xyz={np.round(detected_box_pos, 4)}")
         if dynamic_ik_plan:
             for name, result in dynamic_ik_plan.items():
                 print(f"      ik[{name}]: ok={result.success} "
@@ -2431,6 +3838,156 @@ def main() -> None:
             orientation_weight=GRASP_ORI_WEIGHT, orientation_tol=ori_tol,
             rest_angles=rest, rest_weight=0.015,
         )
+
+    def update_place_plan_for_carried_offset(
+        context: str,
+        *,
+        direct_to_box: bool = False,
+        high_clearance: bool = False,
+    ) -> bool:
+        nonlocal dynamic_ik_plan
+        if dynamic_grasp_xmat is None:
+            print(f"    Cannot update place plan ({context}): grasp frame unknown.")
+            return False
+        box = box_target_center()
+        if box is None:
+            print(f"    Cannot update place plan ({context}): target box unknown.")
+            return False
+        offset = refresh_carried_cube_offset(context)
+        cube_now = current_ball_xyz()
+        release_cube_target = adaptive_box_release_cube_center(
+            box,
+            cube_now if direct_to_box else None,
+        )
+        above_cube_target = carry_step_cube_target(
+            cube_now,
+            box,
+            direct_to_box=direct_to_box,
+            high_clearance=high_clearance,
+        )
+        if direct_to_box:
+            above_cube_target[:2] = release_cube_target[:2]
+            above_cube_target[2] = carry_height_for_xy(
+                release_cube_target[:2],
+                box,
+            )
+            if high_clearance:
+                above_cube_target[2] = max(
+                    above_cube_target[2],
+                    float(box[2] + PLACE_ABOVE_HEIGHT + 0.010),
+                )
+        cube_targets = {
+            "carry_mid": carry_midpoint_for_grasp(
+                cube_now,
+                box,
+                dynamic_grasp_xmat,
+            ),
+            "place_above": above_cube_target,
+            "place_drop": release_cube_target,
+        }
+        scratch = mujoco.MjData(model)
+        scratch.qpos[:] = data.qpos[:]
+        scratch.qvel[:] = 0.0
+        mujoco.mj_forward(model, scratch)
+        rest = arm_ctrl.current()
+        updated: dict[str, IKResult] = {}
+        for name in ("carry_mid", "place_above", "place_drop"):
+            target_offset = offset.copy()
+            if name in ("carry_mid", "place_above"):
+                target_offset[2] = 0.0
+            body_target = gripper_body_target_for_carried_cube(
+                cube_targets[name],
+                dynamic_grasp_xmat,
+                target_offset,
+            )
+            result = solve_oriented_target(
+                scratch,
+                body_target,
+                dynamic_grasp_xmat,
+                rest=rest,
+                pos_tol=0.009,
+                ori_tol=PLACE_ORI_TOL,
+            )
+            if not result.success:
+                result = solve_oriented_target(
+                    scratch,
+                    body_target,
+                    dynamic_grasp_xmat,
+                    rest=rest,
+                    pos_tol=0.012,
+                    ori_tol=0.35,
+                )
+            if not result.success:
+                if name in ("carry_mid", "place_above"):
+                    existing = dynamic_ik_plan.get(name)
+                    if existing is not None and existing.success:
+                        print(f"    Keeping pre-validated {name} plan ({context}); "
+                              "oriented compensation failed, and position-only "
+                              "transport would rotate the held cube.")
+                        result = existing
+                    else:
+                        print(f"    Place compensation IK failed ({context}) "
+                              f"{name}: cube_target={np.round(cube_targets[name], 4)} "
+                              f"body_target={np.round(body_target, 4)} "
+                              f"pos_err={result.error_norm:.4f} "
+                              f"ori_err={result.orientation_error_norm:.3f}.")
+                        return False
+                else:
+                    result = solve_gripper_center_ik(
+                        model, scratch, body_target,
+                        pinch_body_id, pinch_body_id, arm_joints,
+                        max_iter=700, tol=0.010,
+                        rest_angles=rest, rest_weight=0.015,
+                    )
+                    if result.success:
+                        print(f"    Place compensation used position IK ({context}) "
+                              f"{name}: cube_target={np.round(cube_targets[name], 4)} "
+                              f"body_target={np.round(body_target, 4)} "
+                              "actual release remains gated by cube_release_window().")
+            if direct_to_box and name in ("place_above", "place_drop"):
+                pos_result = solve_gripper_center_ik(
+                    model, scratch, body_target,
+                    pinch_body_id, pinch_body_id, arm_joints,
+                    max_iter=900, tol=0.010,
+                    rest_angles=rest, rest_weight=0.015,
+                )
+                if pos_result.success:
+                    if result.success:
+                        old_span = float(np.max(np.abs(result.angles - rest)))
+                        new_span = float(np.max(np.abs(pos_result.angles - rest)))
+                    else:
+                        old_span = float("inf")
+                        new_span = 0.0
+                    if (not result.success or name == "place_above" or
+                            new_span <= old_span * 1.15):
+                        print(f"    Direct box {name} uses position-priority IK "
+                              f"({context}): pos_err={pos_result.error_norm:.4f} "
+                              f"joint_span={new_span:.3f} "
+                              f"oriented_span={old_span:.3f}")
+                        result = pos_result
+            if not result.success:
+                print(f"    Place compensation IK failed ({context}) "
+                      f"{name}: cube_target={np.round(cube_targets[name], 4)} "
+                      f"body_target={np.round(body_target, 4)} "
+                      f"pos_err={result.error_norm:.4f} "
+                      f"ori_err={result.orientation_error_norm:.3f}.")
+                return False
+            updated[name] = result
+            set_joint_positions(model, scratch, arm_joints, result.angles)
+            mujoco.mj_forward(model, scratch)
+            rest = result.angles
+        dynamic_ik_plan.update(updated)
+        release_target = cube_targets["place_drop"]
+        predicted_body = gripper_body_target_for_carried_cube(
+            release_target, dynamic_grasp_xmat, offset)
+        print(f"    Place plan compensated ({context}): "
+              f"box={np.round(box, 4)} "
+              f"cube_release={np.round(release_target, 4)} "
+              f"entry_gap={box_entry_gap_xy(current_ball_xyz(), box)*100:.1f}cm "
+              f"offset={np.round(offset, 4)} "
+              f"gripper_target={np.round(predicted_body, 4)} "
+              f"direct={direct_to_box} high={high_clearance}")
+        return True
 
     def scratch_finger_contact_count(scratch) -> int:
         count = 0
@@ -2570,6 +4127,7 @@ def main() -> None:
 
     def physical_plan_penalty(plan: dict[str, IKResult],
                               ball_xyz: np.ndarray,
+                              box_xyz: np.ndarray,
                               xmat: np.ndarray) -> float:
         """Reject IK poses that reach mathematically but drop the cube physically."""
         if ball_qpos_adr < 0 or ball_dof_adr < 0:
@@ -2604,13 +4162,74 @@ def main() -> None:
 
         def scratch_cube_inside_box() -> bool:
             cube = sim.qpos[ball_qpos_adr:ball_qpos_adr + 3].copy()
-            x_ok = abs(float(cube[0] - BOX_POS[0])) <= (
-                BOX_SIZE[0] - CUBE_HALF_SIZE * 0.25)
-            y_ok = abs(float(cube[1] - BOX_POS[1])) <= (
-                BOX_SIZE[1] - CUBE_HALF_SIZE * 0.25)
-            z_ok = CUBE_REST_Z - 0.004 <= float(cube[2]) <= (
-                BOX_POS[2] + BOX_SIZE[2] + 0.12)
+            box_eval = normalize_box_center_estimate(box_xyz)
+            inner_half = BOX_SIZE[:2] - BOX_WALL - CUBE_HALF_SIZE - 0.004
+            x_ok = abs(float(cube[0] - box_eval[0])) <= inner_half[0]
+            y_ok = abs(float(cube[1] - box_eval[1])) <= inner_half[1]
+            bottom = box_bottom_top_z(box_eval)
+            target = place_release_cube_center(box_eval)
+            z_ok = (
+                bottom + CUBE_HALF_SIZE - PLACE_INSIDE_Z_TOL <= float(cube[2]) <=
+                target[2] + PLACE_RELEASE_Z_TOL
+            )
             return bool(x_ok and y_ok and z_ok)
+
+        def scratch_cube_release_window() -> tuple[bool, float, float, float, float]:
+            cube = sim.qpos[ball_qpos_adr:ball_qpos_adr + 3].copy()
+            box_eval = normalize_box_center_estimate(box_xyz)
+            target = adaptive_box_release_cube_center(box_eval, cube)
+            inner_half = box_release_inner_half()
+            dx = abs(float(cube[0] - box_eval[0]))
+            dy = abs(float(cube[1] - box_eval[1]))
+            bottom = box_bottom_top_z(box_eval)
+            z_low = bottom + CUBE_HALF_SIZE - 0.006
+            z_high = target[2] + PLACE_RELEASE_Z_TOL
+            z = float(cube[2])
+            target_err = float(np.linalg.norm(cube - target))
+            ok = bool(
+                dx <= inner_half[0] and
+                dy <= inner_half[1] and
+                z_low <= z <= z_high
+            )
+            return ok, dx, dy, z, target_err
+
+        def scratch_contact_inside_site(point: np.ndarray, site_id: int) -> bool:
+            site_pos = sim.site_xpos[site_id].copy()
+            site_xmat = sim.site_xmat[site_id].reshape(3, 3)
+            local = site_xmat.T @ (np.asarray(point, dtype=np.float64) - site_pos)
+            size = model.site_size[site_id].copy()
+            return bool(np.all(np.abs(local) <= size + 0.004))
+
+        def scratch_skin_reading() -> TactileReading:
+            left_force = 0.0
+            right_force = 0.0
+            force6 = np.zeros(6, dtype=np.float64)
+            for ci in range(sim.ncon):
+                con = sim.contact[ci]
+                g1 = int(con.geom1)
+                g2 = int(con.geom2)
+                if cube_geom_id not in (g1, g2):
+                    continue
+                other = g2 if g1 == cube_geom_id else g1
+                other_body = int(model.geom_bodyid[other])
+                if other_body not in (int(left_id), int(right_id)):
+                    continue
+                try:
+                    mujoco.mj_contactForce(model, sim, ci, force6)
+                    normal_force = max(0.0, float(force6[0]))
+                except Exception:
+                    normal_force = 0.0
+                if (other_body == int(left_id) and
+                        scratch_contact_inside_site(con.pos, left_skin_site_id)):
+                    left_force += normal_force
+                elif (other_body == int(right_id) and
+                      scratch_contact_inside_site(con.pos, right_skin_site_id)):
+                    right_force += normal_force
+            return TactileReading(
+                left_force=quantize_skin_force(left_force),
+                right_force=quantize_skin_force(right_force),
+                timestamp=float(sim.time),
+            )
 
         def scratch_grip_metrics() -> tuple[float, float, float, float]:
             cube = sim.qpos[ball_qpos_adr:ball_qpos_adr + 3].copy()
@@ -2707,6 +4326,12 @@ def main() -> None:
         grip_sim.hold(GRIP_HOLD_FRAMES)
         for frame_idx in range(GRIP_HOLD_FRAMES):
             write_arm(plan["grasp"].angles)
+            grip_sim.maintain_tactile_force(
+                scratch_skin_reading(),
+                min_force=SKIN_HOLD_MIN_FORCE,
+                target_force=SKIN_HOLD_TARGET_FORCE,
+                max_force=SKIN_HOLD_MAX_FORCE,
+            )
             grip_sim.step()
             step_substeps()
             left_hit, right_hit, contact_count = scratch_finger_contact_sides(sim)
@@ -2731,12 +4356,18 @@ def main() -> None:
         z_before = float(sim.qpos[ball_qpos_adr + 2])
         arm_sim = SmoothArmController(model, sim, arm_joints, joint_to_actuator)
         arm_sim.set_target(plan["lift"].angles,
-                           speed=SPEED_LIFT, min_frames=560)
-        for frame_idx in range(720):
+                           speed=SPEED_LIFT, min_frames=LIFT_MIN_FRAMES)
+        for frame_idx in range(LIFT_MIN_FRAMES + 180):
             arm_sim.step()
+            grip_sim.maintain_tactile_force(
+                scratch_skin_reading(),
+                min_force=SKIN_HOLD_MIN_FORCE,
+                target_force=SKIN_HOLD_TARGET_FORCE,
+                max_force=SKIN_HOLD_MAX_FORCE,
+            )
             grip_sim.step()
             step_substeps()
-            if arm_sim.done and frame_idx > 520:
+            if arm_sim.done and frame_idx > LIFT_MIN_FRAMES - 40:
                 break
 
         cube = sim.qpos[ball_qpos_adr:ball_qpos_adr + 3].copy()
@@ -2747,16 +4378,17 @@ def main() -> None:
         lift_pair_skew, lift_contact_center_err = scratch_finger_contact_alignment(sim, xmat)
         lift_min_dist = scratch_cube_robot_min_contact_dist(sim)
         center_err, open_err, face_err, approach_err = scratch_grip_metrics()
+        lift_preview_min = GRASP_LIFT_HEIGHT * 0.70
         if (not left_hit or not right_hit or
                 not contact_patch_is_large(contacts, lift_patch_span) or
                 lift_pair_skew > MAX_CONTACT_PAIR_SKEW or
                 lift_contact_center_err > MAX_CONTACT_CENTER_ERR or
                 scratch_nonfinger_robot_contact(sim) or
                 lift_min_dist > CONTACT_CONFIRM_MAX_DIST or
-                lifted < 0.10 or err > min(CARRY_MAX_ERR, 0.028)):
+                lifted < lift_preview_min or err > min(CARRY_MAX_ERR, 0.028)):
             return (
                 60.0 +
-                max(0.0, 0.10 - lifted) * 120.0 +
+                max(0.0, lift_preview_min - lifted) * 120.0 +
                 err * 25.0 +
                 max(0, MIN_STABLE_FINGER_CONTACTS - contacts) * 8.0 +
                 max(0.0, MIN_CONTACT_DIVERSITY - lift_patch_span) * 900.0 +
@@ -2769,12 +4401,18 @@ def main() -> None:
             return 50.0 + center_err * 40.0
 
         arm_sim.set_target(plan["carry_mid"].angles,
-                           speed=SPEED_CARRY, min_frames=520)
-        for frame_idx in range(700):
+                           speed=SPEED_CARRY, min_frames=CARRY_MID_MIN_FRAMES)
+        for frame_idx in range(CARRY_MID_MIN_FRAMES + 180):
             arm_sim.step()
+            grip_sim.maintain_tactile_force(
+                scratch_skin_reading(),
+                min_force=SKIN_HOLD_MIN_FORCE,
+                target_force=SKIN_HOLD_TARGET_FORCE,
+                max_force=SKIN_HOLD_MAX_FORCE,
+            )
             grip_sim.step()
             step_substeps()
-            if arm_sim.done and frame_idx > 520:
+            if arm_sim.done and frame_idx > CARRY_MID_MIN_FRAMES - 40:
                 break
 
         cube = sim.qpos[ball_qpos_adr:ball_qpos_adr + 3].copy()
@@ -2802,12 +4440,18 @@ def main() -> None:
             )
 
         arm_sim.set_target(plan["place_above"].angles,
-                           speed=SPEED_CARRY, min_frames=560)
-        for frame_idx in range(760):
+                           speed=SPEED_CARRY, min_frames=CARRY_STEP_MIN_FRAMES)
+        for frame_idx in range(CARRY_STEP_MIN_FRAMES + 180):
             arm_sim.step()
+            grip_sim.maintain_tactile_force(
+                scratch_skin_reading(),
+                min_force=SKIN_HOLD_MIN_FORCE,
+                target_force=SKIN_HOLD_TARGET_FORCE,
+                max_force=SKIN_HOLD_MAX_FORCE,
+            )
             grip_sim.step()
             step_substeps()
-            if arm_sim.done and frame_idx > 560:
+            if arm_sim.done and frame_idx > CARRY_STEP_MIN_FRAMES - 25:
                 break
 
         cube = sim.qpos[ball_qpos_adr:ball_qpos_adr + 3].copy()
@@ -2834,21 +4478,109 @@ def main() -> None:
                 max(0.0, carry_contact_center_err - MAX_CONTACT_CENTER_ERR) * 1000.0
             )
 
+        arm_sim.set_target(plan["place_drop"].angles,
+                           speed=SPEED_PLACE, min_frames=PLACE_DROP_MIN_FRAMES)
+        for frame_idx in range(PLACE_DROP_MIN_FRAMES + 180):
+            arm_sim.step()
+            grip_sim.maintain_tactile_force(
+                scratch_skin_reading(),
+                min_force=SKIN_HOLD_MIN_FORCE,
+                target_force=SKIN_HOLD_TARGET_FORCE,
+                max_force=SKIN_HOLD_MAX_FORCE,
+            )
+            grip_sim.step()
+            step_substeps()
+            if arm_sim.done and frame_idx > PLACE_DROP_MIN_FRAMES - 40:
+                break
+
+        cube = sim.qpos[ball_qpos_adr:ball_qpos_adr + 3].copy()
+        low_ready, low_dx, low_dy, low_z, low_target_err = scratch_cube_release_window()
+        drop_left, drop_right, drop_contacts = scratch_finger_contact_sides(sim)
+        drop_patch_span = scratch_finger_contact_patch_span(sim, xmat)
+        drop_pair_skew, drop_contact_center_err = scratch_finger_contact_alignment(sim, xmat)
+        drop_min_dist = scratch_cube_robot_min_contact_dist(sim)
+        held_low = (
+            drop_left and drop_right and
+            contact_patch_is_large(drop_contacts, drop_patch_span) and
+            drop_pair_skew <= MAX_CONTACT_PAIR_SKEW and
+            drop_contact_center_err <= MAX_CONTACT_CENTER_ERR and
+            drop_min_dist <= CONTACT_CONFIRM_MAX_DIST and
+            not scratch_nonfinger_robot_contact(sim)
+        )
+        if not low_ready or (not held_low and not scratch_cube_inside_box()):
+            return (
+                115.0 +
+                low_target_err * 350.0 +
+                max(0.0, low_dx - (BOX_SIZE[0] - BOX_WALL - CUBE_HALF_SIZE -
+                                   PLACE_RELEASE_XY_MARGIN)) * 2500.0 +
+                max(0.0, low_dy - (BOX_SIZE[1] - BOX_WALL - CUBE_HALF_SIZE -
+                                   PLACE_RELEASE_XY_MARGIN)) * 2500.0 +
+                max(0, MIN_STABLE_FINGER_CONTACTS - drop_contacts) * 12.0 +
+                max(0.0, MIN_CONTACT_DIVERSITY - drop_patch_span) * 900.0 +
+                max(0.0, drop_pair_skew - MAX_CONTACT_PAIR_SKEW) * 1000.0 +
+                max(0.0, drop_contact_center_err - MAX_CONTACT_CENTER_ERR) * 1000.0
+            )
+
+        grip_sim.open(duration_frames=PLACE_RELEASE_OPEN_FRAMES)
+        for frame_idx in range(PLACE_RELEASE_OPEN_FRAMES + BOX_VERIFY_FRAMES + 80):
+            write_arm(plan["place_drop"].angles)
+            grip_sim.step()
+            step_substeps()
+            if grip_sim.done and frame_idx >= PLACE_RELEASE_OPEN_FRAMES:
+                bv = float(np.linalg.norm(sim.qvel[ball_dof_adr:ball_dof_adr + 3]))
+                if frame_idx >= PLACE_RELEASE_OPEN_FRAMES + BOX_VERIFY_FRAMES or bv < 0.010:
+                    break
+
+        if not scratch_cube_inside_box():
+            cube_after = sim.qpos[ball_qpos_adr:ball_qpos_adr + 3].copy()
+            box_eval = normalize_box_center_estimate(box_xyz)
+            miss_xy = float(np.linalg.norm(cube_after[:2] - box_eval[:2]))
+            miss_z = abs(float(cube_after[2] - place_release_cube_center(box_eval)[2]))
+            return 145.0 + miss_xy * 1200.0 + miss_z * 500.0
+
         contact_bonus_penalty = max(
-            0, TARGET_FINGER_CONTACTS - min(contact_count, contacts, mid_contacts, carry_contacts)
+            0, TARGET_FINGER_CONTACTS - min(
+                contact_count, contacts, mid_contacts, carry_contacts, drop_contacts)
         ) * 0.6
         patch_bonus_penalty = max(
             0.0,
             MIN_CONTACT_DIVERSITY * 1.5 -
-            min(close_patch_span, lift_patch_span, mid_patch_span, carry_patch_span),
+            min(close_patch_span, lift_patch_span, mid_patch_span,
+                carry_patch_span, drop_patch_span),
         ) * 120.0
+        center_quality_penalty = max(
+            0.0,
+            max(
+                close_contact_center_err,
+                hold_contact_center_err,
+                lift_contact_center_err,
+                mid_contact_center_err,
+                carry_contact_center_err,
+                drop_contact_center_err,
+            ) - PREFERRED_CONTACT_CENTER_ERR,
+        ) * 900.0
+        skew_quality_penalty = max(
+            0.0,
+            max(
+                close_pair_skew,
+                hold_pair_skew,
+                lift_pair_skew,
+                mid_pair_skew,
+                carry_pair_skew,
+                drop_pair_skew,
+            ) - PREFERRED_CONTACT_PAIR_SKEW,
+        ) * 650.0
         return (
             err * 2.0 + open_err * 4.0 + face_err * 2.0 +
-            contact_bonus_penalty + patch_bonus_penalty
+            approach_err * GRASP_APPROACH_ERR_SCORE_WEIGHT +
+            low_target_err * 35.0 +
+            contact_bonus_penalty + patch_bonus_penalty +
+            center_quality_penalty + skew_quality_penalty
         )
 
     def compute_dynamic_ik(
         ball_xyz: np.ndarray,
+        box_xyz: np.ndarray,
         grasp_z_offs: float | None = None,
         opening_hints: list[np.ndarray] | None = None,
         preview_top_k: int = PHYSICAL_EVAL_TOP_K,
@@ -2858,19 +4590,20 @@ def main() -> None:
         dynamic_grasp_xmat = None
         ball_xyz = np.asarray(ball_xyz, dtype=np.float64).copy()
         ball_xyz[2] = float(np.clip(ball_xyz[2], VISION_Z_MIN, VISION_Z_MAX))
+        box_xyz = np.asarray(box_xyz, dtype=np.float64).copy()
+        box_xyz[2] = float(np.clip(box_xyz[2], CUBE_REST_Z, BOX_DETECTION_Z_MAX))
         z_offset_candidates = (
             list(GRASP_Z_OFFSETS) if grasp_z_offs is None else [float(grasp_z_offs)]
         )
-        carry_mid_contact_target = np.array([
-            0.5 * (ball_xyz[0] + BOX_POS[0]),
-            0.5 * (ball_xyz[1] + BOX_POS[1]),
-            BOX_POS[2] + PLACE_ABOVE_HEIGHT,
-        ], dtype=np.float64)
-        place_above_contact_target = BOX_POS + np.array([0.0, 0.0, PLACE_ABOVE_HEIGHT])
-        place_drop_contact_target = np.array([
-            BOX_POS[0], BOX_POS[1],
-            BOX_POS[2] + BOX_SIZE[2] + CUBE_HALF_SIZE * 0.35,
-        ], dtype=np.float64)
+        place_drop_contact_target = adaptive_box_release_cube_center(
+            box_xyz,
+            ball_xyz,
+        )
+        place_above_contact_target = place_drop_contact_target.copy()
+        place_above_contact_target[2] = carry_height_for_xy(
+            place_drop_contact_target[:2],
+            box_xyz,
+        )
 
         best_plan: dict[str, IKResult] | None = None
         best_xmat: np.ndarray | None = None
@@ -2896,6 +4629,11 @@ def main() -> None:
                     place_above_contact_target,
                     xmat,
                 )
+                carry_mid_contact_target = carry_midpoint_for_grasp(
+                    ball_xyz,
+                    box_xyz,
+                    xmat,
+                )
                 carry_mid_target = gripper_body_target_for_contact(
                     carry_mid_contact_target,
                     xmat,
@@ -2906,6 +4644,7 @@ def main() -> None:
                 )
                 targets = {
                     "approach": grasp_target - 0.13 * z_axis,
+                    "descend_mid": grasp_target - DESCEND_MID_CLEARANCE * z_axis,
                     "grasp": grasp_target,
                     "lift": lift_target,
                     "carry_mid": carry_mid_target,
@@ -2924,8 +4663,15 @@ def main() -> None:
                 score = 0.0
                 rest = home_rest
                 for name, target in targets.items():
-                    if name in ("approach", "grasp"):
-                        pos_tol = 0.004
+                    if name == "approach":
+                        # Approach is only a staging pose.  The strict safety
+                        # gate is the pre-close alignment check near the cube;
+                        # rejecting a 5-8 mm approach error made edge-of-
+                        # workspace moved cubes impossible to grasp.
+                        pos_tol = APPROACH_IK_POS_TOL
+                        ori_tol = GRASP_ORI_TOL
+                    elif name in ("descend_mid", "grasp"):
+                        pos_tol = GRASP_IK_POS_TOL
                         ori_tol = GRASP_ORI_TOL
                     elif name == "lift":
                         pos_tol = 0.007
@@ -2949,6 +4695,13 @@ def main() -> None:
                         )
                         relaxed_lift = result.success
                     relaxed_place = False
+                    if (not result.success and
+                            name in ("carry_mid", "place_above", "place_drop")):
+                        result = solve_oriented_target(
+                            scratch, target, xmat, rest=rest,
+                            pos_tol=0.012, ori_tol=0.35,
+                        )
+                        relaxed_place = result.success
                     if not result.success and name in ("carry_mid", "place_above", "place_drop"):
                         result = solve_gripper_center_ik(
                             model, scratch, target,
@@ -2961,7 +4714,7 @@ def main() -> None:
                     if relaxed_lift:
                         score += 0.5
                     if relaxed_place:
-                        score += 0.6
+                        score += 1.4
                     if not result.success:
                         ok = False
                         score += 20.0
@@ -2971,9 +4724,25 @@ def main() -> None:
                     rest = result.angles
 
                 if ok:
+                    transport_alignment = grasp_transport_alignment(
+                        xmat, ball_xyz, box_xyz)
+                    if transport_alignment < GRASP_TRANSPORT_TARGET_ALIGNMENT:
+                        continue
+                    hint_penalty = grasp_opening_hint_score(xmat, opening_hints)
+                    if opening_hints and hint_penalty > 1e-6:
+                        continue
+                    score += 4.0 * max(
+                        0.0,
+                        GRASP_TRANSPORT_TARGET_ALIGNMENT - transport_alignment,
+                    )
                     score += 0.02 * float(np.linalg.norm(plan["grasp"].angles - home_rest))
-                    score += grasp_stability_score(xmat, ball_xyz)
+                    score += grasp_stability_score(xmat, ball_xyz, box_xyz)
+                    score += hint_penalty
                     score += grasp_frame_penalty(xmat)
+                    score += (
+                        abs(float(current_z_offs) - PREFERRED_GRASP_Z_OFFSET) *
+                        GRASP_HEIGHT_SCORE_WEIGHT
+                    )
                     candidate_plans.append(
                         (score, plan, xmat.copy(), float(current_z_offs)))
                     if score < best_score:
@@ -2996,15 +4765,20 @@ def main() -> None:
             preview_best_score = float("inf")
             for idx, (base_score, plan, xmat, current_z_offs) in enumerate(
                     candidate_plans[:preview_count], start=1):
-                penalty = physical_plan_penalty(plan, ball_xyz, xmat)
+                penalty = physical_plan_penalty(plan, ball_xyz, box_xyz, xmat)
                 total = base_score + penalty
                 y_axis = xmat[:, 1]
                 z_axis = xmat[:, 2]
+                transport_alignment = grasp_transport_alignment(
+                    xmat, ball_xyz, box_xyz)
                 print(f"    Physical preview {idx}: total={total:.2f} "
                       f"penalty={penalty:.2f} "
                       f"open={np.round(y_axis[:2], 2)} "
                       f"approach={np.round(z_axis, 2)} "
-                      f"z_off={current_z_offs*1000:.0f}mm")
+                      f"z_off={current_z_offs*1000:.0f}mm "
+                      f"transport_align={transport_alignment:.2f}")
+                if transport_alignment < GRASP_TRANSPORT_TARGET_ALIGNMENT:
+                    continue
                 if total < preview_best_score:
                     preview_best_score = total
                     preview_best_plan = plan
@@ -3015,53 +4789,17 @@ def main() -> None:
                 best_xmat = preview_best_xmat
 
         if (best_plan is None or
-            set(best_plan) != {"approach", "grasp", "lift", "carry_mid", "place_above", "place_drop"} or
+            set(best_plan) != {
+                "approach", "descend_mid", "grasp",
+                "lift", "carry_mid", "place_above", "place_drop",
+            } or
             any(not result.success for result in best_plan.values())):
-            print("    Pose IK incomplete; falling back to position-only IK.")
-            best_plan = {}
-            scratch = mujoco.MjData(model)
-            scratch.qpos[:] = data.qpos[:]
-            scratch.qvel[:] = 0.0
-            mujoco.mj_forward(model, scratch)
-            fallback_z_offs = float(z_offset_candidates[0])
-            grasp_contact_target = ball_xyz + np.array(
-                [0.0, 0.0, fallback_z_offs], dtype=np.float64)
-            fallback_xmat = make_tool_xmat(
-                np.array([0.0, 0.0, -1.0], dtype=np.float64),
-                (_nearest_world_opening_axis(opening_hints[0])
-                 if opening_hints else _tangent_xy(_radial_xy(ball_xyz[:2]))),
-            )
-            fallback_grasp = gripper_body_target_for_contact(
-                grasp_contact_target, fallback_xmat)
-            fallback_lift = gripper_body_target_for_contact(
-                grasp_contact_target + np.array([0.0, 0.0, GRASP_LIFT_HEIGHT]),
-                fallback_xmat,
-            )
-            fallback_place_above = gripper_body_target_for_contact(
-                place_above_contact_target, fallback_xmat)
-            fallback_carry_mid = gripper_body_target_for_contact(
-                carry_mid_contact_target, fallback_xmat)
-            fallback_place_drop = gripper_body_target_for_contact(
-                place_drop_contact_target, fallback_xmat)
-            fallback_targets = {
-                "approach": fallback_grasp - 0.13 * fallback_xmat[:, 2],
-                "grasp": fallback_grasp,
-                "lift": fallback_lift,
-                "carry_mid": fallback_carry_mid,
-                "place_above": fallback_place_above,
-                "place_drop": fallback_place_drop,
-            }
-            for name, target in fallback_targets.items():
-                result = solve_gripper_center_ik(
-                    model, scratch, target, pinch_body_id, pinch_body_id, arm_joints,
-                    max_iter=700, tol=0.006,
-                )
-                best_plan[name] = result
-                if result.success:
-                    set_joint_positions(model, scratch, arm_joints, result.angles)
-                    mujoco.mj_forward(model, scratch)
-            best_xmat = fallback_xmat.copy()
-            best_z_offs = fallback_z_offs
+            print("    Pose IK incomplete; rejecting position-only fallback "
+                  "because it can approach the cube with the wrong gripper "
+                  "orientation.")
+            dynamic_grasp_xmat = None
+            dynamic_grasp_z_offset = INITIAL_GRASP_Z_OFFSET
+            return {}
 
         if best_xmat is not None:
             dynamic_grasp_xmat = best_xmat.copy()
@@ -3070,7 +4808,10 @@ def main() -> None:
                   f"open={np.round(best_xmat[:, 1], 2)} "
                   f"approach={np.round(best_xmat[:, 2], 2)} "
                   f"grasp_z_offset={dynamic_grasp_z_offset*1000:.0f}mm")
-        for name in ("approach", "grasp", "lift", "carry_mid", "place_above", "place_drop"):
+        for name in (
+            "approach", "descend_mid", "grasp",
+            "lift", "carry_mid", "place_above", "place_drop",
+        ):
             result = best_plan[name]
             status = "reachable" if result.success else "UNREACHABLE"
             print(f"  IK {name:8s}: {status}, pos={result.error_norm:.4f}m, "
@@ -3085,34 +4826,389 @@ def main() -> None:
         lifted = float(cube[2] - CUBE_REST_Z)
         return err, lifted
 
-    def cube_is_secured() -> bool:
+    def cube_is_secured(*, strict_visual: bool = False) -> bool:
+        nonlocal last_visual_secure_override_frame
         err, lifted = cube_carry_metrics()
         left_pad_hit, right_pad_hit, pad_contacts = pad_cube_contact_sides()
         patch_span = finger_contact_patch_span()
         pair_skew, contact_center_err = finger_contact_alignment()
+        skin = read_skin()
+        contact_pair_ok = left_pad_hit and right_pad_hit and pad_contacts >= MIN_STABLE_FINGER_CONTACTS
+        contact_ok = (
+            left_pad_hit and right_pad_hit and
+            contact_patch_is_large(pad_contacts, patch_span) and
+            pair_skew <= MAX_CONTACT_PAIR_SKEW and
+            contact_center_err <= MAX_CONTACT_CENTER_ERR
+        )
+        geometry_ok = lifted > CARRY_MIN_LIFT and err < CARRY_MAX_ERR
+        tactile_lock_ok = (
+            lifted > CARRY_MIN_LIFT and
+            err < TACTILE_SECURE_OVERRIDE_MAX_ERR and
+            contact_ok and
+            skin_squeeze_ok(skin, TACTILE_SECURE_OVERRIDE_MIN_FORCE) and
+            visual_grip_slip_m <= 0.018 and
+            visual_grip_drop_m <= 0.010
+        )
         visual_ok = (
             visual_grip_reference_offset is None or
-            visual_grip_miss_count > 2 or
             (
                 visual_grip_slip_m <= VISUAL_GRIP_ERR_HARD_M and
                 visual_grip_drop_m <= VISUAL_GRIP_DROP_HARD_M
-            )
+            ) or
+            (not strict_visual and visual_grip_miss_count > 2)
         )
+        tactile_pair_ok = (
+            contact_pair_ok and
+            skin_squeeze_ok(skin, SKIN_HOLD_MIN_FORCE) and
+            visual_ok
+        )
+        if geometry_ok and (contact_ok or tactile_pair_ok) and visual_ok:
+            return True
+        strict_tactile_override = (
+            contact_pair_ok and
+            geometry_ok and
+            skin_squeeze_ok(skin, SKIN_HOLD_TARGET_FORCE) and
+            visual_grip_slip_m <= 0.012 and
+            visual_grip_drop_m <= 0.006
+        )
+        if strict_visual and not visual_ok and not strict_tactile_override:
+            if frame - last_visual_secure_override_frame >= TACTILE_SECURE_LOG_EVERY_N:
+                last_visual_secure_override_frame = frame
+                print(f"    Strict lift grip check blocked transport: "
+                      f"skin=({skin.left_force:.2f},{skin.right_force:.2f})N "
+                      f"contacts={pad_contacts} err={err*100:.1f}cm "
+                      f"lift={lifted*100:.1f}cm "
+                      f"{visual_grip_summary()}")
+            return False
+        if strict_visual and not visual_ok and strict_tactile_override:
+            if frame - last_visual_secure_override_frame >= TACTILE_SECURE_LOG_EVERY_N:
+                last_visual_secure_override_frame = frame
+                print(f"    Strict lift grip check accepted strong tactile hold: "
+                      f"skin=({skin.left_force:.2f},{skin.right_force:.2f})N "
+                      f"contacts={pad_contacts} err={err*100:.1f}cm "
+                      f"lift={lifted*100:.1f}cm "
+                      f"{visual_grip_summary()}")
+            return True
+        if not visual_ok and tactile_lock_ok:
+            if frame - last_visual_secure_override_frame >= TACTILE_SECURE_LOG_EVERY_N:
+                last_visual_secure_override_frame = frame
+                print(f"    Tactile/contact grip trusted over visual slip: "
+                      f"skin=({skin.left_force:.2f},{skin.right_force:.2f})N "
+                      f"contacts={pad_contacts} err={err*100:.1f}cm "
+                      f"lift={lifted*100:.1f}cm "
+                      f"{visual_grip_summary()}")
+            return True
+        return False
+
+    def cube_transport_safe(label: str, *, require_high_lift: bool = True) -> bool:
+        nonlocal transport_slip_abort_frames, last_visual_secure_override_frame
+        if cube_inside_box():
+            transport_slip_abort_frames = 0
+            return True
+        contact_ok_now = cube_transport_contact_ok()
+        relaxed_hold_now = cube_transport_relaxed_hold_ok()
+        geometry_hold_now = cube_transport_geometry_hold_ok()
+        stiction_hold_now = cube_transport_stiction_hold_ok()
+        visual_ready = visual_grip_reference_offset is not None and visual_grip_weight > 0.35
+        moderate_slip = visual_ready and (
+            visual_grip_slip_m > VISUAL_TRANSPORT_ABORT_SLIP_M or
+            visual_grip_drop_m > VISUAL_TRANSPORT_ABORT_DROP_M
+        )
+        severe_slip = visual_ready and (
+            visual_grip_slip_m > VISUAL_TRANSPORT_SEVERE_SLIP_M or
+            visual_grip_drop_m > VISUAL_TRANSPORT_SEVERE_DROP_M
+        )
+        if ((moderate_slip or severe_slip) and
+                (contact_ok_now or relaxed_hold_now or geometry_hold_now or
+                 stiction_hold_now)):
+            transport_slip_abort_frames = 0
+            if frame - last_visual_secure_override_frame >= TACTILE_SECURE_LOG_EVERY_N:
+                last_visual_secure_override_frame = frame
+                print(f"    Transport visual slip accepted by tactile hold "
+                      f"({label}): {visual_grip_summary()}")
+            return True
+        if moderate_slip:
+            transport_slip_abort_frames += 1
+        else:
+            transport_slip_abort_frames = max(0, transport_slip_abort_frames - 1)
+        if severe_slip or transport_slip_abort_frames >= VISUAL_TRANSPORT_ABORT_FRAMES:
+            print(f"    Transport slip guard ({label}) blocked path: "
+                  f"{visual_grip_summary()} "
+                  f"frames={transport_slip_abort_frames}/"
+                  f"{VISUAL_TRANSPORT_ABORT_FRAMES}")
+            return False
+        if require_high_lift and not (
+                contact_ok_now or relaxed_hold_now or geometry_hold_now or
+                stiction_hold_now):
+            print(f"    Transport contact guard ({label}) blocked path: "
+                  f"{visual_grip_summary()}")
+            return False
+        return True
+
+    def cube_transport_contact_ok() -> bool:
+        err, lifted = cube_carry_metrics()
+        left_pad_hit, right_pad_hit, pad_contacts = pad_cube_contact_sides()
+        patch_span = finger_contact_patch_span()
+        pair_skew, contact_center_err = finger_contact_alignment()
+        skin = read_skin()
         return (
             lifted > CARRY_MIN_LIFT and
-            err < CARRY_MAX_ERR and
+            err < TACTILE_SECURE_OVERRIDE_MAX_ERR and
             left_pad_hit and right_pad_hit and
             contact_patch_is_large(pad_contacts, patch_span) and
             pair_skew <= MAX_CONTACT_PAIR_SKEW and
             contact_center_err <= MAX_CONTACT_CENTER_ERR and
-            visual_ok
+            skin_squeeze_ok(skin, TACTILE_SECURE_OVERRIDE_MIN_FORCE)
         )
+
+    def cube_transport_relaxed_hold_ok() -> bool:
+        err, lifted = cube_carry_metrics()
+        left_pad_hit, right_pad_hit, pad_contacts = pad_cube_contact_sides()
+        skin = read_skin()
+        return (
+            lifted > CARRY_MIN_LIFT and
+            err < PLACE_HELD_RECOVERY_MAX_ERR and
+            left_pad_hit and right_pad_hit and
+            pad_contacts >= MIN_STABLE_FINGER_CONTACTS and
+            skin_squeeze_ok(skin, SKIN_HOLD_TARGET_FORCE)
+        )
+
+    def cube_transport_geometry_hold_ok() -> bool:
+        err, lifted = cube_carry_metrics()
+        left_pad_hit, right_pad_hit, pad_contacts = pad_cube_contact_sides()
+        patch_span = finger_contact_patch_span()
+        pair_skew, contact_center_err = finger_contact_alignment()
+        return (
+            lifted > CARRY_MIN_LIFT and
+            err < 0.018 and
+            left_pad_hit and right_pad_hit and
+            pad_contacts >= MIN_STABLE_FINGER_CONTACTS and
+            contact_patch_is_large(pad_contacts, patch_span) and
+            pair_skew <= MAX_CONTACT_PAIR_SKEW and
+            contact_center_err <= MAX_CONTACT_CENTER_ERR and
+            visual_grip_drop_m <= 0.008
+        )
+
+    def cube_transport_stiction_hold_ok() -> bool:
+        if not grip_locked:
+            return False
+        err, lifted = cube_carry_metrics()
+        lin_v, _ = cube_velocity_norms()
+        left_pad_hit, right_pad_hit, pad_contacts = pad_cube_contact_sides()
+        skin = read_skin()
+        contact_rich_centered = (
+            pad_contacts >= MIN_STABLE_FINGER_CONTACTS and
+            err <= 0.012 and
+            (left_pad_hit or right_pad_hit)
+        )
+        centered_single_contact = (
+            pad_contacts >= 1 and
+            (left_pad_hit or right_pad_hit) and
+            err <= 0.012 and
+            max(skin.left_force, skin.right_force) >= SKIN_TOUCH_FORCE and
+            lin_v <= 0.12 and
+            visual_grip_drop_m <= 0.006
+        )
+        return (
+            lifted > CARRY_MIN_LIFT and
+            err < GRIP_STICTION_MAX_ERR and
+            pad_contacts >= 1 and
+            (left_pad_hit or right_pad_hit) and
+            (
+                max(skin.left_force, skin.right_force) >= SKIN_CONFIRM_FORCE or
+                contact_rich_centered or
+                centered_single_contact
+            ) and
+            visual_grip_drop_m <= 0.012
+        )
+
+    def carry_segment_can_advance(
+        min_frames: int,
+        *,
+        qerr_limit: float = 0.060,
+        qvel_limit: float = 0.120,
+    ) -> bool:
+        if carry_motion_frames < int(min_frames):
+            return False
+        q_err, max_qvel = arm_ctrl.settle_metrics()
+        return q_err <= qerr_limit and max_qvel <= qvel_limit
+
+    def begin_transport_regrip(reason: str, resume_sub: int) -> bool:
+        nonlocal sub, transport_regrip_count, transport_regrip_frames
+        nonlocal transport_regrip_stable_frames, transport_regrip_resume_sub
+        nonlocal transport_slip_abort_frames, status_msg
+
+        if transport_regrip_count >= TRANSPORT_REGRIP_MAX_COUNT:
+            return False
+        err, lifted = cube_carry_metrics()
+        lin_v, _ = cube_velocity_norms()
+        left_pad_hit, right_pad_hit, pad_contacts = pad_cube_contact_sides()
+        skin = read_skin()
+        still_near_gripper = (
+            lifted > CARRY_MIN_LIFT and
+            err <= TRANSPORT_REGRIP_MAX_ERR and
+            lin_v <= TRANSPORT_REGRIP_MAX_SPEED
+        )
+        centered_gap_can_be_caught = (
+            grip_locked and
+            lifted > CARRY_MIN_LIFT and
+            err <= 0.006 and
+            lin_v <= TRANSPORT_REGRIP_MAX_SPEED and
+            visual_grip_drop_m <= 0.006
+        )
+        has_recoverable_contact = (
+            pad_contacts >= 1 or
+            max(skin.left_force, skin.right_force) >= SKIN_CONFIRM_FORCE or
+            centered_gap_can_be_caught
+        )
+        if not (still_near_gripper and has_recoverable_contact):
+            return False
+
+        transport_regrip_count += 1
+        transport_regrip_frames = 0
+        transport_regrip_stable_frames = 0
+        transport_regrip_resume_sub = int(resume_sub)
+        transport_slip_abort_frames = 0
+        arm_ctrl.set_target(arm_ctrl.current(), speed=SPEED_CARRY * 0.35,
+                            min_frames=1)
+        gripper_ctrl.hold(duration_frames=GRIP_TRANSPORT_HOLD_FRAMES)
+        reset_visual_grip_feedback(f"transport regrip: {reason}")
+        sub = -30
+        status_msg = "Recovering transport grip before continuing ..."
+        print(f"    Transport re-grip recovery "
+              f"{transport_regrip_count}/{TRANSPORT_REGRIP_MAX_COUNT}: "
+              f"{reason}; err={err*100:.1f}cm lift={lifted*100:.1f}cm "
+              f"contacts={pad_contacts} left={left_pad_hit} right={right_pad_hit} "
+              f"skin=({skin.left_force:.2f},{skin.right_force:.2f})N")
+        return True
+
+    def recover_place_while_holding(reason: str) -> bool:
+        nonlocal phase, sub, detected_box_pos, box_rgbd_scan_estimates
+        nonlocal box_scan_targets, box_scan_idx, box_scan_hint_xy_used
+        nonlocal place_settle_frames, place_correction_count, status_msg
+        nonlocal transport_slip_abort_frames
+        nonlocal carry_motion_frames, carry_last_remaining_xy, carry_stall_steps
+
+        if phase != 6:
+            return False
+
+        if cube_inside_box():
+            cube = current_ball_xyz()
+            print(f"    Placement recovery: cube is already supported in box; "
+                  f"continuing to soft release. cube={np.round(cube, 4)}")
+            phase = 7
+            sub = 0
+            return True
+
+        cube = current_ball_xyz()
+        err, lifted = cube_carry_metrics()
+        skin = read_skin()
+        left_pad_hit, right_pad_hit, pad_contacts = pad_cube_contact_sides()
+        actual_contact = pad_contacts >= MIN_STABLE_FINGER_CONTACTS
+        bilateral_contact = left_pad_hit and right_pad_hit
+        tactile_pair = skin_squeeze_ok(skin, SKIN_FORCE_MIN_RECOGNITION_N)
+        near_gripper = err <= PLACE_HELD_RECOVERY_MAX_ERR
+        elevated = (
+            lifted >= PLACE_HELD_RECOVERY_MIN_LIFT or
+            cube[2] > CUBE_STATIC_ANCHOR_MAX_Z
+        )
+        still_carried = bool(
+            gripper_ctrl.holding and
+            near_gripper and
+            elevated and
+            actual_contact and
+            (bilateral_contact or tactile_pair)
+        )
+        if not still_carried:
+            return False
+
+        print(f"    Placement recovery keeps gripper closed ({reason}): "
+              f"cube={np.round(cube, 4)} err={err*100:.1f}cm "
+              f"lift={lifted*100:.1f}cm "
+              f"finger_contacts={pad_contacts} "
+              f"left={left_pad_hit} right={right_pad_hit} "
+              f"skin=({skin.left_force:.2f},{skin.right_force:.2f})N. "
+              "Continuing placement instead of opening in mid-air.")
+        ensure_transport_grip_hold(f"place recovery: {reason}")
+        maintain_fused_grip_force(
+            f"place recovery: {reason}",
+            reading=skin,
+            force_visual=True,
+        )
+
+        if box_target_center() is not None:
+            box_now = box_target_center()
+            remaining_xy = float(np.linalg.norm(
+                box_now[:2] - current_ball_xyz()[:2]))
+            entry_gap = box_entry_gap_xy(current_ball_xyz(), box_now)
+            direct_recovery = entry_gap <= CARRY_STEP_FINAL_DIRECT_XY_M
+            if update_place_plan_for_carried_offset(
+                    f"held placement recovery: {reason}",
+                    direct_to_box=direct_recovery):
+                reset_visual_grip_feedback(f"held placement recovery: {reason}")
+                update_visual_grip_feedback(
+                    f"held placement recovery: {reason}",
+                    force=True,
+                )
+                transport_slip_abort_frames = 0
+                if cube_over_box_entry() or cube_ready_for_guided_place_drop():
+                    print("    Held cube is inside the box opening corridor; "
+                          "lowering for guarded release.")
+                    arm_ctrl.set_target(
+                        dynamic_ik_plan["place_drop"].angles,
+                        speed=SPEED_PLACE,
+                        min_frames=max(80, PLACE_DROP_MIN_FRAMES // 2),
+                    )
+                    carry_motion_frames = 0
+                    sub = 3
+                    status_msg = "Lowering held cube into box after recovery ..."
+                    return True
+                print(f"    Held cube still {remaining_xy*100:.1f}cm from box "
+                      f"(entry_gap={entry_gap*100:.1f}cm); "
+                      "continuing with a bounded carry step.")
+                arm_ctrl.set_target(
+                    dynamic_ik_plan["place_above"].angles,
+                    speed=SPEED_CARRY * (0.38 if direct_recovery else 0.45),
+                    min_frames=max(CARRY_STEP_MIN_FRAMES * 2, 190),
+                )
+                carry_motion_frames = 0
+                sub = 2
+                status_msg = "Continuing held cube toward box ..."
+                return True
+            print("    Held placement recovery could not update the carry plan; "
+                  "falling back to a bounded box re-scan.")
+
+        detected_box_pos = None
+        box_rgbd_scan_estimates = []
+        box_scan_targets = []
+        box_scan_idx = 0
+        box_scan_hint_xy_used = None
+        place_settle_frames = 0
+        place_correction_count = 0
+
+        place_above = dynamic_ik_plan.get("place_above")
+        if place_above is not None and place_above.success:
+            arm_ctrl.set_target(
+                place_above.angles,
+                speed=SPEED_PLACE,
+                min_frames=max(PLACE_RESCAN_RETURN_MIN_FRAMES,
+                               PLACE_ABOVE_MIN_FRAMES // 2),
+            )
+            carry_motion_frames = 0
+            sub = -21
+            status_msg = "Keeping cube held; returning above box for re-scan ..."
+        else:
+            arm_ctrl.set_target(arm_ctrl.current(), speed=SPEED_SCAN, min_frames=1)
+            sub = -20
+            status_msg = "Keeping cube held; re-scanning target box ..."
+        return True
 
     def pre_close_alignment_ok(label: str) -> bool:
         cube = current_ball_xyz()
         object_center = gripper_object_center()
         xy_err = float(np.linalg.norm((object_center - cube)[:2]))
         z_err = abs(float(object_center[2] - cube[2]))
+        ori_err = 0.0
         if dynamic_grasp_xmat is not None:
             opening_axis = _unit(
                 dynamic_grasp_xmat[:, 1],
@@ -3122,6 +5218,8 @@ def main() -> None:
                 dynamic_grasp_xmat[:, 0],
                 np.array([1.0, 0.0, 0.0], dtype=np.float64),
             )
+            actual_xmat = data.xmat[tool_id].reshape(3, 3)
+            ori_err = orientation_error_norm(actual_xmat, dynamic_grasp_xmat)
         else:
             left = data.xpos[left_id].copy()
             right = data.xpos[right_id].copy()
@@ -3141,7 +5239,8 @@ def main() -> None:
               f"xy_err={xy_err*100:.1f}cm z_err={z_err*100:.1f}cm "
               f"open_axis={open_axis_err*100:.1f}cm "
               f"face_axis={face_axis_err*100:.1f}cm "
-              f"center={center_err*100:.1f}cm")
+              f"center={center_err*100:.1f}cm "
+              f"ori_err={ori_err:.3f}")
         if bad_contact:
             print(f"    {label}: rejected, cube is touching non-finger robot part "
                   f"{bad_name}")
@@ -3151,18 +5250,62 @@ def main() -> None:
             z_err <= PRE_CLOSE_MAX_Z_ERR and
             open_axis_err <= PRE_CLOSE_MAX_OPEN_AXIS_ERR and
             face_axis_err <= PRE_CLOSE_MAX_FACE_AXIS_ERR and
-            center_err <= PRE_CLOSE_MAX_CENTER_ERR
+            center_err <= PRE_CLOSE_MAX_CENTER_ERR and
+            ori_err <= PRE_CLOSE_MAX_ORI_ERR
         )
 
     def restart_search(reason: str) -> None:
         nonlocal phase, sub, scan_idx, scan_targets, detected_ball_pos
+        nonlocal box_scan_idx, box_scan_targets, box_search_hint_xy
+        nonlocal box_scan_hint_xy_used
         nonlocal detected_opening_hints, dynamic_ik_plan, regrasp_count, scan_round, status_msg
         nonlocal pregrasp_replan_count, local_replan_count, dynamic_grasp_xmat
-        nonlocal dynamic_grasp_z_offset
+        nonlocal dynamic_grasp_z_offset, place_settle_frames, place_correction_count
+        nonlocal place_support_rescan_count, place_release_support_override
+        nonlocal carried_cube_offset
+        nonlocal prelift_hold_frames, prelift_ready_frames, lift_motion_frames
+        nonlocal carry_motion_frames, carry_last_remaining_xy, carry_stall_steps
+        nonlocal transport_slip_abort_frames
+        nonlocal transport_regrip_count, transport_regrip_frames
+        nonlocal transport_regrip_stable_frames, transport_regrip_resume_sub
         nonlocal rgbd_scan_estimates, rgbd_scan_hints
+        nonlocal recovery_wait_frames, recovery_stable_frames, recovery_reason
+        if recover_place_while_holding(reason):
+            return
         print(f"    Restarting search: {reason}")
         release_grip_lock("restart search")
-        set_cube_static_anchor("restart search")
+        release_cube_static_anchor("restart search")
+        cube_now = current_ball_xyz()
+        placement_or_transport_failure = any(
+            key in reason for key in (
+                "carry",
+                "transport",
+                "release",
+                "place",
+                "box",
+                "slipping",
+                "dropped",
+            )
+        )
+        high_cube_recovery = (
+            ball_qpos_adr >= 0 and
+            (
+                cube_now[2] > CUBE_STATIC_ANCHOR_MAX_Z or
+                (
+                    placement_or_transport_failure and
+                    cube_now[2] > CUBE_REST_Z + 0.010
+                )
+            ) and
+            not cube_inside_box()
+        )
+        if high_cube_recovery:
+            print(f"    High cube recovery before rescan: "
+                  f"cube={np.round(cube_now, 4)} "
+                  f"max_anchor_z={CUBE_STATIC_ANCHOR_MAX_Z:.3f}m")
+            gripper_ctrl.open(duration_frames=HIGH_CUBE_RECOVERY_OPEN_FRAMES)
+            arm_ctrl.set_target(arm_ctrl.current(), speed=SPEED_SCAN, min_frames=1)
+        else:
+            set_cube_static_anchor("restart search")
         detected_ball_pos = None
         detected_opening_hints = []
         dynamic_ik_plan = {}
@@ -3172,13 +5315,44 @@ def main() -> None:
         rgbd_scan_hints = []
         scan_targets = []
         scan_idx = 0
+        box_scan_targets = []
+        box_scan_idx = 0
+        box_search_hint_xy = None
+        box_scan_hint_xy_used = None
         regrasp_count = 0
         pregrasp_replan_count = 0
         local_replan_count = 0
+        place_settle_frames = 0
+        place_correction_count = 0
+        place_support_rescan_count = 0
+        place_release_support_override = False
+        prelift_hold_frames = 0
+        prelift_ready_frames = 0
+        lift_motion_frames = 0
+        carry_motion_frames = 0
+        carry_last_remaining_xy = float("inf")
+        carry_stall_steps = 0
+        transport_slip_abort_frames = 0
+        transport_regrip_count = 0
+        transport_regrip_frames = 0
+        transport_regrip_stable_frames = 0
+        transport_regrip_resume_sub = 2
+        carried_cube_offset = None
         scan_round = 0
-        phase = 0
-        sub = 0
-        status_msg = f"Rescanning cube ({reason}) ..."
+        if high_cube_recovery:
+            recovery_wait_frames = 0
+            recovery_stable_frames = 0
+            recovery_reason = reason
+            phase = 8
+            sub = 10
+            status_msg = (
+                "Recovering high cube before rescan "
+                f"({reason}) ..."
+            )
+        else:
+            phase = 0
+            sub = 0
+            status_msg = f"Rescanning cube ({reason}) ..."
 
     def begin_local_rgbd_replan(reason: str) -> None:
         """Retreat to the current approach pose and reacquire RGB-D locally."""
@@ -3231,6 +5405,222 @@ def main() -> None:
             detector.last_estimate_spread_m <= GLOBAL_RGBD_STRONG_SINGLE_VIEW_SPREAD_M
         )
 
+    def stable_box_rgbd_estimate() -> tuple[np.ndarray | None, float]:
+        if not box_rgbd_scan_estimates:
+            return None, float("inf")
+        arr = np.vstack(box_rgbd_scan_estimates)
+        med = np.median(arr, axis=0)
+        errs = np.linalg.norm(arr - med, axis=1)
+        if errs.size == 0:
+            return None, float("inf")
+        keep = errs <= max(BOX_ESTIMATE_STABILITY_M, float(np.median(errs)) + 0.020)
+        if np.any(keep):
+            arr = arr[keep]
+        robust = np.median(arr, axis=0)
+        spread = float(np.max(np.linalg.norm(arr - robust, axis=1))) if len(arr) else 0.0
+        return robust, spread
+
+    def box_single_view_is_strong() -> bool:
+        extent = box_detector.last_extent_m
+        return bool(
+            box_detector.last_area_px >= BOX_STRONG_SINGLE_VIEW_AREA_PX and
+            extent[0] >= BOX_STRONG_SINGLE_VIEW_MIN_XY_EXTENT_M and
+            extent[1] >= BOX_STRONG_SINGLE_VIEW_MIN_XY_EXTENT_M and
+            extent[2] >= BOX_STRONG_SINGLE_VIEW_MIN_Z_EXTENT_M
+        )
+
+    def try_plan_from_detected_targets(label: str) -> bool:
+        nonlocal dynamic_ik_plan, phase, sub, status_msg
+        nonlocal pregrasp_replan_count
+        nonlocal scan_targets, scan_idx
+
+        if detected_ball_pos is None:
+            return False
+        if REQUIRE_BOX_BEFORE_GRASP and detected_box_pos is None:
+            status_msg = (f"Cube found by RGB-D; continuing autonomous scan "
+                          f"for target box before grasp. "
+                          f"cube=({detected_ball_pos[0]:.3f},"
+                          f"{detected_ball_pos[1]:.3f},"
+                          f"{detected_ball_pos[2]:.3f})")
+            print("    Cube estimate is ready, but target box is not yet "
+                  "reliably localized. Continuing scan before grasp so "
+                  "placement is planned from a full box estimate.")
+            dynamic_ik_plan = {}
+            scan_targets = []
+            scan_idx = 0
+            sub = -10
+            return True
+
+        pregrasp_replan_count = 0
+        planning_box = planning_box_for_cube_first(detected_ball_pos)
+        planning_hints = (
+            detected_opening_hints if detected_opening_hints
+            else rgbd_scan_hints[-8:]
+        )
+        planning_hints = expand_face_opening_hints(planning_hints[:2])
+        if planning_hints:
+            print("    Planning grasp with RGB-D face-opening candidates: "
+                  f"{[np.round(h[:2], 3).tolist() for h in planning_hints[:4]]}")
+        dynamic_ik_plan = compute_dynamic_ik(
+            detected_ball_pos,
+            planning_box,
+            opening_hints=planning_hints,
+        )
+        if plan_is_ready(dynamic_ik_plan):
+            if detected_box_pos is None:
+                status_msg = (f"Cube found by RGB-D; grasping first, "
+                              f"box will be localized after lift. "
+                              f"cube=({detected_ball_pos[0]:.3f},"
+                              f"{detected_ball_pos[1]:.3f},"
+                              f"{detected_ball_pos[2]:.3f})")
+                print("    Cube plan ready; target box is still unknown, "
+                      "so the robot will grasp first and run a dedicated "
+                      "box scan after lift.")
+            else:
+                status_msg = (f"Cube and box found by RGB-D! "
+                              f"cube=({detected_ball_pos[0]:.3f},"
+                              f"{detected_ball_pos[1]:.3f},"
+                              f"{detected_ball_pos[2]:.3f}) "
+                              f"box=({detected_box_pos[0]:.3f},"
+                              f"{detected_box_pos[1]:.3f},"
+                              f"{detected_box_pos[2]:.3f})")
+            arm_ctrl.set_target(arm_ctrl.current(), speed=SPEED_SCAN, min_frames=1)
+            phase = 2
+            sub = 0
+            return True
+        print(f"    RGB-D targets rejected ({label}): no complete IK plan.")
+        diagnose_failure("RGB-D cube/box estimate without reachable plan")
+        dynamic_ik_plan = {}
+        return False
+
+    def planning_box_for_cube_first(cube_xyz: np.ndarray) -> np.ndarray:
+        """Return the real box center if known; otherwise a temporary grasp-only target."""
+        if detected_box_pos is not None:
+            return detected_box_pos.copy()
+        cube_xyz = np.asarray(cube_xyz, dtype=np.float64)
+        return cube_xyz + np.array([0.0, 0.0, 0.037], dtype=np.float64)
+
+    def box_for_pregrasp_replan(cube_xyz: np.ndarray, label: str) -> np.ndarray:
+        box = box_target_center()
+        if box is not None:
+            return box
+        provisional = planning_box_for_cube_first(cube_xyz)
+        print(f"    {label}: target box is still unknown; keeping cube-first "
+              f"grasp plan with provisional placement target "
+              f"{np.round(provisional, 4)}. Dedicated box scan will run after lift.")
+        return provisional
+
+    def accept_box_scan_estimate(est_xyz: np.ndarray, label: str) -> bool:
+        nonlocal detected_box_pos, box_rgbd_scan_estimates, box_search_hint_xy
+
+        if box_scan_hint_xy_used is not None:
+            hint_err = float(np.linalg.norm(est_xyz[:2] - box_scan_hint_xy_used))
+            if hint_err > BOX_HINT_MAX_DEVIATION_M:
+                box_search_hint_xy = box_scan_hint_xy_used.copy()
+                print(f"    RGB-D box estimate rejected ({label}): "
+                      f"hint_err={hint_err*100:.1f}cm "
+                      f"estimate={np.round(est_xyz[:2], 3)} "
+                      f"hint={np.round(box_scan_hint_xy_used, 3)}")
+                return False
+
+        box_rgbd_scan_estimates.append(est_xyz.copy())
+        if len(box_rgbd_scan_estimates) > BOX_ESTIMATE_MAX_VIEWS:
+            box_rgbd_scan_estimates = box_rgbd_scan_estimates[-BOX_ESTIMATE_MAX_VIEWS:]
+
+        stable_xyz, stable_spread = stable_box_rgbd_estimate()
+        ready = (
+            stable_xyz is not None and
+            len(box_rgbd_scan_estimates) >= 2 and
+            stable_spread <= BOX_ESTIMATE_STABILITY_M
+        )
+        if not ready and box_single_view_is_strong():
+            ready = True
+            stable_xyz = est_xyz.copy()
+            stable_spread = 0.0
+            print("    RGB-D single-view box extent is strong enough for placement.")
+
+        print(f"    RGB-D box estimate set ({label}): "
+              f"{len(box_rgbd_scan_estimates)}/2 "
+              f"stable={ready} spread={stable_spread*100:.1f}cm "
+              f"median={np.round(stable_xyz, 3) if stable_xyz is not None else None}")
+        if ready and stable_xyz is not None:
+            detected_box_pos = normalize_box_center_estimate(stable_xyz)
+            if abs(float(detected_box_pos[2] - stable_xyz[2])) > 0.002:
+                print(f"    Box Z normalized for tabletop placement: "
+                      f"rgbd_z={stable_xyz[2]:.4f} -> "
+                      f"used_z={detected_box_pos[2]:.4f}")
+            if phase in (5, 6):
+                return True
+            return try_plan_from_detected_targets(label)
+        return False
+
+    def reprioritize_box_scan_from_hint(reason: str) -> bool:
+        nonlocal box_scan_idx, box_scan_targets, box_scan_hint_xy_used
+
+        if box_search_hint_xy is None:
+            return False
+        if (box_scan_hint_xy_used is not None and
+                np.linalg.norm(box_scan_hint_xy_used - box_search_hint_xy) < 0.015):
+            return False
+
+        box_scan_targets = generate_box_scan_targets(
+            box_search_hint_xy,
+            z_plane=HELD_BOX_SCAN_Z_PLANE,
+        )
+        box_scan_idx = 0
+        box_scan_hint_xy_used = box_search_hint_xy.copy()
+        print(f"    Reprioritizing box scan around visual hint "
+              f"{np.round(box_search_hint_xy, 3)} ({reason}).")
+        return True
+
+    def accept_partial_box_hint_for_place(reason: str) -> bool:
+        nonlocal detected_box_pos, box_rgbd_scan_estimates
+        nonlocal box_scan_targets, box_scan_idx, box_scan_hint_xy_used
+        nonlocal sub, status_msg
+
+        if not ALLOW_PARTIAL_BOX_HINT_PLACEMENT:
+            if box_search_hint_xy is not None:
+                print(f"    Partial RGB-D box hint is not trusted for final "
+                      f"placement ({reason}): "
+                      f"hint_xy={np.round(box_search_hint_xy, 4)}. "
+                      "Continuing scan for a full box estimate.")
+            return False
+        if box_search_hint_xy is None:
+            return False
+        candidate = np.array([
+            float(box_search_hint_xy[0]),
+            float(box_search_hint_xy[1]),
+            BOX_CENTER_Z_PRIOR,
+        ], dtype=np.float64)
+        detected_box_pos = normalize_box_center_estimate(candidate)
+        box_rgbd_scan_estimates = [detected_box_pos.copy()]
+        box_scan_targets = []
+        box_scan_idx = 0
+        box_scan_hint_xy_used = box_search_hint_xy.copy()
+        print(f"    Using partial RGB-D box hint for guarded placement "
+              f"({reason}): hint_xy={np.round(box_search_hint_xy, 4)} "
+              f"box={np.round(detected_box_pos, 4)}")
+        if update_place_plan_for_carried_offset(f"partial box hint: {reason}"):
+            sub = 0
+            status_msg = "Using partial RGB-D box hint for placement ..."
+            return True
+        detected_box_pos = None
+        box_rgbd_scan_estimates = []
+        return False
+
+    def held_box_scan_target_is_safe(target: ScanTarget) -> bool:
+        offset = (
+            carried_cube_offset.copy() if carried_cube_offset is not None
+            else current_ball_xyz() - gripper_object_center()
+        )
+        predicted_cube = target.gripper + offset
+        if predicted_cube[2] < HELD_BOX_SCAN_MIN_CUBE_Z:
+            print(f"    Skipping low held-box scan target: "
+                  f"aim={np.round(target.aim, 3)} "
+                  f"pred_cube_z={predicted_cube[2]:.3f}m")
+            return False
+        return True
+
     def accept_global_scan_estimate(est_xyz: np.ndarray, label: str) -> bool:
         nonlocal detected_ball_pos, detected_opening_hints, dynamic_ik_plan
         nonlocal pregrasp_replan_count, phase, sub, status_msg
@@ -3263,24 +5653,8 @@ def main() -> None:
         if ready and stable_xyz is not None:
             detected_ball_pos = stable_xyz.copy()
             detected_opening_hints = rgbd_scan_hints[-8:]
-            pregrasp_replan_count = 0
-            dynamic_ik_plan = compute_dynamic_ik(
-                detected_ball_pos,
-                opening_hints=detected_opening_hints,
-            )
-            if plan_is_ready(dynamic_ik_plan):
-                status_msg = (f"Cube found by stable RGB-D! "
-                              f"X={stable_xyz[0]:.3f} "
-                              f"Y={stable_xyz[1]:.3f} "
-                              f"Z={stable_xyz[2]:.3f}")
-                arm_ctrl.set_target(arm_ctrl.current(), speed=SPEED_SCAN, min_frames=1)
-                phase = 2
-                sub = 0
+            if try_plan_from_detected_targets(label):
                 return True
-            print("    Stable RGB-D estimate rejected: no complete IK plan.")
-            diagnose_failure("stable RGB-D estimate without reachable plan")
-            detected_ball_pos = None
-            dynamic_ik_plan = {}
         elif len(rgbd_scan_estimates) >= GLOBAL_RGBD_MAX_VIEWS:
             print("    RGB-D estimates are not stable enough yet; "
                   "discarding oldest views and continuing scan.")
@@ -3288,14 +5662,24 @@ def main() -> None:
 
     def demo_tick() -> None:
         nonlocal phase, sub, finished, scan_idx, scan_targets, regrasp_count
-        nonlocal detected_ball_pos, detected_opening_hints
+        nonlocal detected_ball_pos, detected_box_pos, detected_opening_hints
         nonlocal dynamic_ik_plan, status_msg, ball_z_before_lift
         nonlocal scan_round, box_verify_left, pregrasp_replan_count
         nonlocal grip_contact_hold, grip_close_frames, gripper_open_wait_frames, local_replan_count
-        nonlocal prelift_lost_frames
+        nonlocal preclose_stable_frames, place_settle_frames, prelift_lost_frames
+        nonlocal prelift_hold_frames, prelift_ready_frames, lift_motion_frames
+        nonlocal carry_motion_frames, carry_last_remaining_xy, carry_stall_steps
+        nonlocal transport_slip_abort_frames
+        nonlocal transport_regrip_count, transport_regrip_frames
+        nonlocal transport_regrip_stable_frames, transport_regrip_resume_sub
+        nonlocal carried_cube_offset, place_correction_count
+        nonlocal place_support_rescan_count, place_release_support_override
         nonlocal dynamic_grasp_xmat, dynamic_grasp_z_offset, rejected_grasp_frames
-        nonlocal rgbd_scan_estimates, rgbd_scan_hints
+        nonlocal rgbd_scan_estimates, rgbd_scan_hints, box_rgbd_scan_estimates
         nonlocal last_scan_rgbd_sample_frame
+        nonlocal box_scan_idx, box_scan_targets, box_search_hint_xy
+        nonlocal box_scan_hint_xy_used
+        nonlocal recovery_wait_frames, recovery_stable_frames, recovery_reason
 
         if finished:
             return
@@ -3307,19 +5691,148 @@ def main() -> None:
 
         # 鈹€鈹€ Phase 0:  scanning 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
         elif phase == 0:
+            if sub == -10:
+                if detected_ball_pos is None:
+                    sub = 0
+                    return
+                scan_targets = generate_box_scan_targets(
+                    box_search_hint_xy,
+                    z_plane=HELD_BOX_SCAN_Z_PLANE,
+                )
+                box_scan_hint_xy_used = (
+                    box_search_hint_xy.copy()
+                    if box_search_hint_xy is not None else None
+                )
+                scan_idx = 0
+                last_scan_rgbd_sample_frame = -SCAN_RGBD_CAPTURE_EVERY_N
+                print(f">>> Phase 0b : Target box scan before grasp "
+                      f"({len(scan_targets)} candidate views, "
+                      f"hint={np.round(box_search_hint_xy, 3) if box_search_hint_xy is not None else None})")
+                while scan_idx < len(scan_targets):
+                    scan_target = scan_targets[scan_idx]
+                    result = solve_gripper_center_ik(
+                        model, data, scan_target.gripper,
+                        pinch_body_id, pinch_body_id, arm_joints,
+                        max_iter=700, tol=SCAN_POS_TOL,
+                        target_xmat=scan_target.xmat, orientation_body_id=tool_id,
+                        orientation_weight=SCAN_ORI_WEIGHT, orientation_tol=SCAN_ORI_TOL,
+                    )
+                    if result.success:
+                        print(f"    Moving to pre-grasp box scan "
+                              f"{scan_idx+1}/{len(scan_targets)} "
+                              f"aim={np.round(scan_target.aim, 3)}")
+                        arm_ctrl.set_target(result.angles, speed=SPEED_SCAN)
+                        status_msg = (
+                            f"Box scan before grasp {scan_idx+1}/"
+                            f"{len(scan_targets)} ..."
+                        )
+                        sub = -9
+                        return
+                    scan_idx += 1
+                print("    No reachable pre-grasp box scan pose; returning to "
+                      "global scan.")
+                sub = 0
+                return
+
+            if sub == -9:
+                if not arm_ctrl.done:
+                    if (arm_ctrl.near_done(SCAN_MOVING_CAPTURE_PROGRESS) and
+                            frame - last_scan_rgbd_sample_frame >= SCAN_RGBD_CAPTURE_EVERY_N):
+                        last_scan_rgbd_sample_frame = frame
+                        box_xyz = capture_box_from_rgbd(
+                            f"moving pre-grasp box scan {scan_idx+1}/"
+                            f"{len(scan_targets)}",
+                            log_miss=False,
+                        )
+                        if box_xyz is not None:
+                            if accept_box_scan_estimate(
+                                box_xyz,
+                                f"moving pre-grasp box scan {scan_idx+1}/"
+                                f"{len(scan_targets)}",
+                            ):
+                                return
+                            if box_search_hint_xy is not None:
+                                scan_targets = generate_box_scan_targets(
+                                    box_search_hint_xy,
+                                    z_plane=HELD_BOX_SCAN_Z_PLANE,
+                                )
+                                scan_idx = 0
+                    return
+
+                last_scan_rgbd_sample_frame = frame
+                box_xyz = capture_box_from_rgbd(
+                    f"pre-grasp box scan {scan_idx+1}/{len(scan_targets)}",
+                    log_miss=(detected_box_pos is None),
+                )
+                if box_xyz is not None:
+                    if accept_box_scan_estimate(
+                        box_xyz,
+                        f"pre-grasp box scan {scan_idx+1}/{len(scan_targets)}",
+                    ):
+                        return
+                    if box_search_hint_xy is not None:
+                        scan_targets = generate_box_scan_targets(
+                            box_search_hint_xy,
+                            z_plane=HELD_BOX_SCAN_Z_PLANE,
+                        )
+                        scan_idx = 0
+
+                scan_idx += 1
+                while scan_idx < len(scan_targets):
+                    scan_target = scan_targets[scan_idx]
+                    result = solve_gripper_center_ik(
+                        model, data, scan_target.gripper,
+                        pinch_body_id, pinch_body_id, arm_joints,
+                        max_iter=700, tol=SCAN_POS_TOL,
+                        target_xmat=scan_target.xmat, orientation_body_id=tool_id,
+                        orientation_weight=SCAN_ORI_WEIGHT, orientation_tol=SCAN_ORI_TOL,
+                    )
+                    if result.success:
+                        print(f"    Moving to pre-grasp box scan "
+                              f"{scan_idx+1}/{len(scan_targets)} "
+                              f"aim={np.round(scan_target.aim, 3)}")
+                        arm_ctrl.set_target(result.angles, speed=SPEED_SCAN)
+                        status_msg = (
+                            f"Box scan before grasp {scan_idx+1}/"
+                            f"{len(scan_targets)} ..."
+                        )
+                        return
+                    scan_idx += 1
+                print("    Pre-grasp box scan exhausted without a full box "
+                      "estimate; returning to global scan.")
+                sub = 0
+                return
+
             if sub == 0:
                 if rgbd_window is None:
                     print("    ERROR: RGB-D camera is not available; refusing to use a fixed cube target.")
                     status_msg = "ERROR: RGB-D camera unavailable"
                     finished = True
                     return
-                print(">>> Phase 0 : Camera scanning for cube ...")
+                print(">>> Phase 0 : Camera scanning for cube and target box ...")
+                rgbd_scan_estimates = []
+                rgbd_scan_hints = []
+                if detected_box_pos is None:
+                    box_rgbd_scan_estimates = []
+                last_scan_rgbd_sample_frame = -SCAN_RGBD_CAPTURE_EVERY_N
+                est_xyz = capture_cube_from_rgbd("initial stationary view")
+                if est_xyz is not None:
+                    if accept_global_scan_estimate(
+                        est_xyz, "initial stationary view"
+                    ):
+                        return
+                box_xyz = capture_box_from_rgbd(
+                    "initial stationary view",
+                    log_miss=(detected_box_pos is None),
+                )
+                if box_xyz is not None:
+                    if accept_box_scan_estimate(
+                        box_xyz, "initial stationary view"
+                    ):
+                        return
                 scan_targets = generate_scan_targets(
                     _last_bz, hint_xy=np.array([_last_bx, _last_by], dtype=np.float64)
                 )
-                rgbd_scan_estimates = []
-                rgbd_scan_hints = []
-                last_scan_rgbd_sample_frame = -SCAN_RGBD_CAPTURE_EVERY_N
                 print(f"    Generated {len(scan_targets)} global scan poses "
                       f"(360-degree polar rings + angled edge views)")
                 scan_idx = 0
@@ -3360,7 +5873,8 @@ def main() -> None:
 
             elif sub == 1:
                 if not arm_ctrl.done:
-                    if frame - last_scan_rgbd_sample_frame >= SCAN_RGBD_CAPTURE_EVERY_N:
+                    if (arm_ctrl.near_done(SCAN_MOVING_CAPTURE_PROGRESS) and
+                            frame - last_scan_rgbd_sample_frame >= SCAN_RGBD_CAPTURE_EVERY_N):
                         last_scan_rgbd_sample_frame = frame
                         est_xyz = capture_cube_from_rgbd(
                             f"moving scan {scan_idx+1}/{len(scan_targets)}",
@@ -3370,6 +5884,16 @@ def main() -> None:
                         if est_xyz is not None:
                             if accept_global_scan_estimate(
                                 est_xyz,
+                                f"moving scan {scan_idx+1}/{len(scan_targets)}",
+                            ):
+                                return
+                        box_xyz = capture_box_from_rgbd(
+                            f"moving scan {scan_idx+1}/{len(scan_targets)}",
+                            log_miss=False,
+                        )
+                        if box_xyz is not None:
+                            if accept_box_scan_estimate(
+                                box_xyz,
                                 f"moving scan {scan_idx+1}/{len(scan_targets)}",
                             ):
                                 return
@@ -3384,6 +5908,16 @@ def main() -> None:
                 if est_xyz is not None:
                     if accept_global_scan_estimate(
                         est_xyz,
+                        f"settled scan {scan_idx+1}/{len(scan_targets)}",
+                    ):
+                        return
+                box_xyz = capture_box_from_rgbd(
+                    f"settled scan {scan_idx+1}/{len(scan_targets)}",
+                    log_miss=(detected_box_pos is None),
+                )
+                if box_xyz is not None:
+                    if accept_box_scan_estimate(
+                        box_xyz,
                         f"settled scan {scan_idx+1}/{len(scan_targets)}",
                     ):
                         return
@@ -3410,8 +5944,13 @@ def main() -> None:
                 # All scan poses exhausted — restart scan loop
                 scan_round += 1
                 if scan_round >= 3:
-                    print("    Cube not found after 3 full scan rounds — stopping.")
-                    status_msg = "ERROR: cube not found — check lighting / camera"
+                    if detected_ball_pos is not None and detected_box_pos is None:
+                        print("    Cube is localized, but target box was not "
+                              "found after 3 full scan rounds — stopping.")
+                        status_msg = "ERROR: target box not found by RGB-D"
+                    else:
+                        print("    Cube not found after 3 full scan rounds — stopping.")
+                        status_msg = "ERROR: cube not found — check lighting / camera"
                     finished = True
                     return
                 print(f"    All {len(scan_targets)} poses scanned — "
@@ -3461,16 +6000,32 @@ def main() -> None:
                     return
                 fresh = capture_cube_from_rgbd("local retreat re-acquire")
                 if fresh is None:
+                    if (cube_static_anchor_active and
+                            detected_ball_pos is not None and
+                            plan_is_ready(dynamic_ik_plan)):
+                        anchor_delta = float(np.linalg.norm(
+                            detected_ball_pos - cube_static_pos))
+                        if anchor_delta <= max(PREGRASP_ANCHORED_CUBE_MAX_ERR_M,
+                                               PRE_CLOSE_MAX_CENTER_ERR):
+                            print("    Local RGB-D reacquire missed/rejected an "
+                                  "anchored cube; using stable global scan plan.")
+                            pregrasp_replan_count = 0
+                            phase = 3
+                            sub = 0
+                            return
                     diagnose_failure("local RGB-D reacquire failed")
                     begin_local_rgbd_replan(
                         "local RGB-D reacquire failed after retreat")
                     return
                 detected_ball_pos = fresh.copy()
+                box = box_for_pregrasp_replan(
+                    detected_ball_pos, "Local re-acquire")
                 previous_xmat = (
                     None if dynamic_grasp_xmat is None else dynamic_grasp_xmat.copy()
                 )
                 replanned = compute_dynamic_ik(
                     detected_ball_pos,
+                    box,
                     opening_hints=detected_opening_hints,
                     preview_top_k=LOCAL_PHYSICAL_EVAL_TOP_K,
                 )
@@ -3493,11 +6048,27 @@ def main() -> None:
                 fresh = capture_cube_from_rgbd("pre-grasp confirm")
                 if fresh is None:
                     if detected_ball_pos is not None and plan_is_ready(dynamic_ik_plan):
-                        print("    Pre-grasp RGB-D lost cube, likely due to close-range "
-                              "occlusion; continuing with the last RGB-D estimate.")
-                        pregrasp_replan_count = 0
-                        phase = 3; sub = 0
-                        return
+                        if cube_static_anchor_active:
+                            anchor_delta = float(np.linalg.norm(
+                                detected_ball_pos - cube_static_pos))
+                            if anchor_delta <= max(PRE_CLOSE_MAX_CENTER_ERR, 0.030):
+                                print("    Pre-grasp RGB-D missed an anchored cube "
+                                      f"(anchor_err={anchor_delta*100:.1f}cm); "
+                                      "using stable scan estimate and "
+                                      "physical-preview plan.")
+                                pregrasp_replan_count = 0
+                                phase = 3
+                                sub = 0
+                                return
+                        expected_visible, reason = rgbd_frustum_status(detected_ball_pos)
+                        if not expected_visible:
+                            print("    Pre-grasp RGB-D expected miss from side camera "
+                                  f"({reason}); using stable scan estimate and "
+                                  "physical-preview plan.")
+                            pregrasp_replan_count = 0
+                            phase = 3
+                            sub = 0
+                            return
                     diagnose_failure("pre-grasp RGB-D lost cube")
                     begin_local_rgbd_replan(
                         "cube moved out of RGB-D view before grasp")
@@ -3508,6 +6079,16 @@ def main() -> None:
                     anchor_delta = float(np.linalg.norm(fresh - cube_static_pos))
                     print(f"    RGB-D pre-grasp debug: delta={delta*100:.1f}cm "
                           f"anchor_err={anchor_delta*100:.1f}cm")
+                    if (anchor_delta > PREGRASP_ANCHORED_CUBE_MAX_ERR_M and
+                            plan_is_ready(dynamic_ik_plan)):
+                        print("    Pre-grasp RGB-D estimate conflicts with the "
+                              "stationary cube anchor; keeping the stable global "
+                              "scan plan instead of replanning from an occluded "
+                              "close-range frame.")
+                        pregrasp_replan_count = 0
+                        phase = 3
+                        sub = 0
+                        return
 
                 if delta <= LOCAL_RGBD_KEEP_PLAN_DELTA and plan_is_ready(dynamic_ik_plan):
                     print(f"    Pre-grasp RGB-D stable (delta={delta*100:.1f}cm); "
@@ -3518,11 +6099,14 @@ def main() -> None:
                     return
 
                 detected_ball_pos = fresh.copy()
+                box = box_for_pregrasp_replan(
+                    detected_ball_pos, "Pre-grasp RGB-D")
                 previous_xmat = (
                     None if dynamic_grasp_xmat is None else dynamic_grasp_xmat.copy()
                 )
                 replanned = compute_dynamic_ik(
                     detected_ball_pos,
+                    box,
                     opening_hints=detected_opening_hints,
                     preview_top_k=LOCAL_PHYSICAL_EVAL_TOP_K,
                 )
@@ -3608,11 +6192,18 @@ def main() -> None:
                     regrasp_count > 0 or not plan_is_ready(dynamic_ik_plan)
                 )
                 if replan_needed:
+                    box = box_target_center()
+                    if box is None:
+                        print("    Cannot descend: target box has not been located yet.")
+                        phase = 0
+                        sub = 0
+                        return
                     previous_xmat = (
                         None if dynamic_grasp_xmat is None else dynamic_grasp_xmat.copy()
                     )
                     replanned = compute_dynamic_ik(
                         detected_ball_pos,
+                        box,
                         grasp_z_offs=z_offs,
                         opening_hints=detected_opening_hints,
                         preview_top_k=LOCAL_PHYSICAL_EVAL_TOP_K,
@@ -3629,9 +6220,44 @@ def main() -> None:
                     diagnose_failure("descend requested with incomplete plan")
                     begin_local_rgbd_replan("incomplete IK plan before descend")
                     return
+                print("    Descending via midpoint to reduce lateral finger sweep.")
+                arm_ctrl.set_target(
+                    dynamic_ik_plan["descend_mid"].angles,
+                    speed=SPEED_SLOW,
+                    min_frames=DESCEND_MID_MIN_FRAMES,
+                )
+                preclose_stable_frames = 0
+                sub = 5
+                status_msg = f"Descending to pre-grasp midpoint (retry {regrasp_count}) ..."
+            if sub == 5:
+                if not arm_ctrl.done:
+                    if cube_touching_robot():
+                        min_dist = cube_robot_min_contact_dist()
+                        bad_contact, bad_name = cube_nonfinger_robot_contact()
+                        print(f"    Early contact before descend midpoint "
+                              f"(min_dist={min_dist*1000:.2f} mm); "
+                              "rejecting this approach path.")
+                        if bad_contact:
+                            print(f"    Midpoint contact body: {bad_name}")
+                        remember_failed_grasp_frame("early contact before descend midpoint")
+                        set_cube_static_anchor("early contact before descend midpoint")
+                        begin_local_rgbd_replan("early contact before descend midpoint")
+                    return
+                if cube_touching_robot():
+                    min_dist = cube_robot_min_contact_dist()
+                    bad_contact, bad_name = cube_nonfinger_robot_contact()
+                    print(f"    Contact at descend midpoint "
+                          f"(min_dist={min_dist*1000:.2f} mm); "
+                          "rejecting this approach path before final descent.")
+                    if bad_contact:
+                        print(f"    Midpoint contact body: {bad_name}")
+                    remember_failed_grasp_frame("contact at descend midpoint")
+                    set_cube_static_anchor("contact at descend midpoint")
+                    begin_local_rgbd_replan("contact at descend midpoint")
+                    return
                 arm_ctrl.set_target(dynamic_ik_plan["grasp"].angles, speed=SPEED_SLOW)
                 sub = 1
-                status_msg = f"Descending (retry {regrasp_count}) ..."
+                status_msg = f"Final short descent (retry {regrasp_count}) ..."
             if sub == 1 and not arm_ctrl.done and cube_touching_robot():
                 min_dist = cube_robot_min_contact_dist()
                 bad_contact, bad_name = cube_nonfinger_robot_contact()
@@ -3642,10 +6268,18 @@ def main() -> None:
                     if bad_contact:
                         print(f"    Early contact body: {bad_name}")
                     remember_failed_grasp_frame("early contact during descent")
-                    release_cube_static_anchor("early contact during descent")
+                    set_cube_static_anchor("early contact during descent")
                     begin_local_rgbd_replan("early cube contact during descent")
                     return
             if arm_ctrl.near_done(DESCEND_CLOSE_PROGRESS):
+                if not arm_ctrl.done:
+                    preclose_stable_frames = 0
+                    q_err, max_qvel = arm_ctrl.settle_metrics()
+                    status_msg = (
+                        "Finishing descent before soft close "
+                        f"(qerr={q_err:.3f}, qvel={max_qvel:.3f}) ..."
+                    )
+                    return
                 preclose_touch = cube_touching_robot()
                 bad_contact, bad_name = cube_nonfinger_robot_contact()
                 min_dist = cube_robot_min_contact_dist()
@@ -3671,15 +6305,42 @@ def main() -> None:
                     begin_local_rgbd_replan("pre-close alignment mismatch")
                     return
                 if preclose_touch:
+                    left_pad_hit, right_pad_hit, pad_contacts = pad_cube_contact_sides()
+                    if not (left_pad_hit and right_pad_hit):
+                        print(f"    One-sided pre-close fingertip contact: "
+                              f"left={left_pad_hit} right={right_pad_hit} "
+                              f"finger_contacts={pad_contacts}; rejecting this "
+                              "grasp posture before closing.")
+                        remember_failed_grasp_frame("one-sided pre-close contact")
+                        diagnose_failure("one-sided pre-close contact")
+                        begin_local_rgbd_replan("one-sided pre-close contact")
+                        return
                     print(f"    Pre-close fingertip contact accepted "
-                          f"(min_dist={min_dist*1000:.2f} mm); closing now.")
+                          f"(min_dist={min_dist*1000:.2f} mm); "
+                          "releasing anchor and closing now.")
+                else:
+                    preclose_stable_frames += 1
+                    if preclose_stable_frames < PRE_CLOSE_STABLE_FRAMES:
+                        if preclose_stable_frames == 1:
+                            q_err, max_qvel = arm_ctrl.settle_metrics()
+                            print(f"    Pre-close alignment OK; settling before release "
+                                  f"({preclose_stable_frames}/{PRE_CLOSE_STABLE_FRAMES}, "
+                                  f"qerr={q_err:.4f}, qvel={max_qvel:.4f})")
+                        status_msg = (
+                            "Settling at grasp pose before soft close "
+                            f"({preclose_stable_frames}/{PRE_CLOSE_STABLE_FRAMES}) ..."
+                        )
+                        return
                 local_replan_count = 0
                 ball_z_before_lift = float(current_ball_xyz()[2])
+                release_cube_for_soft_close("pre-close alignment passed")
+                preclose_stable_frames = 0
                 phase = 4; sub = 0
 
         # 鈹€鈹€ Phase 4:  close gripper 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
         elif phase == 4:
             if sub == 0:
+                release_cube_for_soft_close("start gripper close")
                 gc = gripper_object_center()
                 ball = current_ball_xyz()
                 err = np.linalg.norm(ball - gc)
@@ -3688,6 +6349,8 @@ def main() -> None:
                 grip_contact_hold = 0
                 grip_close_frames = 0
                 prelift_lost_frames = 0
+                prelift_hold_frames = 0
+                prelift_ready_frames = 0
                 reset_visual_grip_feedback("new grasp close")
                 gripper_ctrl.close(duration_frames=GRIP_CLOSE_FRAMES)
                 sub = 1
@@ -3760,6 +6423,8 @@ def main() -> None:
                           f"hold={grip_contact_hold}/{GRIP_CONTACT_HOLD_FRAMES}")
                     if activate_grip_lock("after close"):
                         gripper_ctrl.hold(duration_frames=GRIP_HOLD_FRAMES)
+                        prelift_hold_frames = 0
+                        prelift_ready_frames = 0
                         sub = 2
                         status_msg = "Stabilizing grasp before lift ..."
                     else:
@@ -3802,13 +6467,22 @@ def main() -> None:
                 skin = read_skin()
                 geom = grip_geometry_metrics()
                 maintain_fused_grip_force("pre-lift hold", skin)
-                if not (left_pad_hit and right_pad_hit and
-                        contact_patch_is_large(pad_contacts, patch_span) and
-                        pair_skew <= MAX_CONTACT_PAIR_SKEW and
-                        contact_center_err <= MAX_CONTACT_CENTER_ERR and
-                        min_dist <= CONTACT_CONFIRM_MAX_DIST and
-                        skin_squeeze_ok(skin, SKIN_TOUCH_FORCE) and
-                        bool(geom["ok"])):
+                prelift_hold_frames += 1
+                strong_tactile_pair = (
+                    pad_contacts >= MIN_STABLE_FINGER_CONTACTS and
+                    skin_squeeze_ok(skin, SKIN_PRELIFT_READY_FORCE)
+                )
+                prelift_contact_ok = (
+                    left_pad_hit and right_pad_hit and
+                    (contact_patch_is_large(pad_contacts, patch_span) or
+                     strong_tactile_pair) and
+                    pair_skew <= MAX_CONTACT_PAIR_SKEW and
+                    contact_center_err <= MAX_CONTACT_CENTER_ERR and
+                    min_dist <= CONTACT_CONFIRM_MAX_DIST and
+                    skin_squeeze_ok(skin, SKIN_TOUCH_FORCE) and
+                    bool(geom["ok"])
+                )
+                if not prelift_contact_ok:
                     prelift_lost_frames += 1
                     if prelift_lost_frames < PRELIFT_LOST_GRACE_FRAMES:
                         if prelift_lost_frames == 1 or prelift_lost_frames % 6 == 0:
@@ -3842,7 +6516,12 @@ def main() -> None:
                         phase = 8; sub = 0
                     return
                 prelift_lost_frames = 0
-                if grip_close_frames % 40 == 0:
+                force_ready = skin_squeeze_ok(skin, SKIN_PRELIFT_READY_FORCE)
+                if force_ready:
+                    prelift_ready_frames += 1
+                else:
+                    prelift_ready_frames = 0
+                if prelift_hold_frames == 1 or prelift_hold_frames % 20 == 0:
                     print(f"    Pre-lift grip hold: contacts={contacts} "
                           f"finger_contacts={pad_contacts} "
                           f"patch_span={patch_span*1000:.1f}mm "
@@ -3851,11 +6530,30 @@ def main() -> None:
                           f"contact_dist={min_dist*1000:.2f}mm "
                           f"skin=({skin.left_force:.2f},{skin.right_force:.2f})N "
                           f"bal={skin.balance:.2f} "
+                          f"ready={prelift_ready_frames}/{GRIP_PRELIFT_READY_FRAMES} "
+                          f"hold={prelift_hold_frames}/{GRIP_PRELIFT_MIN_FRAMES} "
                           f"center={geom['center_err']*100:.1f}cm")
                 grip_close_frames += 1
-                if gripper_ctrl.done:
+                if (prelift_hold_frames >= GRIP_PRELIFT_MIN_FRAMES and
+                        prelift_ready_frames >= GRIP_PRELIFT_READY_FRAMES):
+                    print(f"    Pre-lift grip ready: "
+                          f"skin=({skin.left_force:.2f},{skin.right_force:.2f})N "
+                          f"ready_force={SKIN_PRELIFT_READY_FORCE:.1f}N "
+                          f"stable={prelift_ready_frames} frames; lifting now.")
                     phase = 5; sub = 0
                     status_msg = "Grip stable; lifting ..."
+                elif gripper_ctrl.done:
+                    print(f"    Pre-lift force did not reach target in time: "
+                          f"skin=({skin.left_force:.2f},{skin.right_force:.2f})N "
+                          f"ready={prelift_ready_frames}/{GRIP_PRELIFT_READY_FRAMES} "
+                          f"hold={prelift_hold_frames}/{GRIP_HOLD_FRAMES}")
+                    remember_failed_grasp_frame("pre-lift force not ready")
+                    diagnose_failure("pre-lift force not ready")
+                    regrasp_count += 1
+                    if regrasp_count >= MAX_REGRASP:
+                        restart_search("pre-lift force not ready")
+                    else:
+                        phase = 8; sub = 0
 
         # 鈹€鈹€ Phase 5:  lift + verify 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
         elif phase == 5:
@@ -3863,13 +6561,25 @@ def main() -> None:
                 print(">>> Phase 5 : Lift & verify")
                 gripper_ctrl.hold(duration_frames=GRIP_TRANSPORT_HOLD_FRAMES)
                 arm_ctrl.set_target(dynamic_ik_plan["lift"].angles,
-                                    speed=SPEED_LIFT, min_frames=560)
+                                    speed=SPEED_LIFT, min_frames=LIFT_MIN_FRAMES)
+                lift_motion_frames = 0
                 sub = 1
                 status_msg = "Lifting ..."
-            if sub == 1 and gripper_ctrl.holding:
+            if sub == 1:
+                lift_motion_frames += 1
+                ensure_transport_grip_hold("lift")
                 maintain_fused_grip_force("lift")
-            if arm_ctrl.done:
+            lift_reached_safe_height = (
+                lift_motion_frames >= LIFT_MIN_FRAMES + 55 and
+                float(current_ball_xyz()[2] - ball_z_before_lift) >=
+                GRASP_LIFT_HEIGHT * 0.78 and
+                cube_transport_contact_ok()
+            )
+            if arm_ctrl.done or lift_reached_safe_height:
                 # 鈹€鈹€ Verify: did the cube actually rise? 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+                if lift_reached_safe_height and not arm_ctrl.done:
+                    print(f"    Lift reached safe carry height before full settle "
+                          f"({lift_motion_frames} frames); verifying grasp now.")
                 ball_z_now = float(current_ball_xyz()[2])
                 lifted = ball_z_now - ball_z_before_lift
                 print(f"    Cube Z: before={ball_z_before_lift:.3f}  "
@@ -3877,8 +6587,32 @@ def main() -> None:
                 carry_err, carry_lift = cube_carry_metrics()
                 print(f"    Carry check: err={carry_err*100:.1f}cm  "
                       f"lift={carry_lift*100:.1f}cm")
-                if cube_is_secured():
+                if cube_is_secured(strict_visual=True):
                     print(f"    Grasp SUCCESS after {regrasp_count} retries")
+                    place_correction_count = 0
+                    place_support_rescan_count = 0
+                    place_release_support_override = False
+                    carry_last_remaining_xy = float("inf")
+                    carry_stall_steps = 0
+                    transport_regrip_count = 0
+                    transport_regrip_frames = 0
+                    transport_regrip_stable_frames = 0
+                    if detected_box_pos is None:
+                        print("    Target box is still unknown after grasp; "
+                              "starting dedicated RGB-D box scan while holding.")
+                        box_scan_targets = []
+                        box_scan_idx = 0
+                        rejected_grasp_frames = []
+                        phase = 6
+                        sub = -20
+                        regrasp_count = 0
+                        status_msg = "Locating target box while holding cube ..."
+                        return
+                    if not update_place_plan_for_carried_offset(
+                            "lift verification"):
+                        diagnose_failure("place compensation failed after lift")
+                        restart_search("place compensation failed after lift")
+                        return
                     rejected_grasp_frames = []
                     phase = 6; sub = 0; regrasp_count = 0
                 else:
@@ -3894,47 +6628,514 @@ def main() -> None:
 
         # 鈹€鈹€ Phase 6:  move to box 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
         elif phase == 6:
-            if sub in (1, 2, 3) and gripper_ctrl.holding:
+            if sub in (-21, -20, -19, -18, 1, 2, 3, 4):
+                ensure_transport_grip_hold(f"carry{sub}")
                 maintain_fused_grip_force(f"carry{sub}")
+            if sub in (1, 2, 3):
+                carry_motion_frames += 1
+                if carry_motion_frames % 80 == 0:
+                    err, lifted = cube_carry_metrics()
+                    q_err, max_qvel = arm_ctrl.settle_metrics()
+                    cube_now = current_ball_xyz()
+                    box_now = box_target_center()
+                    remaining_xy = (
+                        float(np.linalg.norm(box_now[:2] - cube_now[:2]))
+                        if box_now is not None else float("nan")
+                    )
+                    print(f"    Phase 6 progress sub={sub} "
+                          f"frames={carry_motion_frames} "
+                          f"near={arm_ctrl.near_done(0.90)} "
+                          f"done={arm_ctrl.done} "
+                          f"qerr={q_err:.3f} qvel={max_qvel:.3f} "
+                          f"err={err*100:.1f}cm lift={lifted*100:.1f}cm "
+                          f"remain_xy={remaining_xy*100:.1f}cm")
+            if sub in (1, 2):
+                if (sub == 2 and cube_over_box_entry() and
+                        visual_grip_weight > 0.80 and
+                        visual_grip_drop_m > 0.010):
+                    print("    Cube is over box opening with visible downward slip; "
+                          "lowering now before grip weakens.")
+                    if update_place_plan_for_carried_offset(
+                            "proactive low place over box"):
+                        arm_ctrl.set_target(
+                            dynamic_ik_plan["place_drop"].angles,
+                            speed=SPEED_PLACE,
+                            min_frames=max(90, PLACE_DROP_MIN_FRAMES // 2),
+                        )
+                        carry_motion_frames = 0
+                        sub = 3
+                        status_msg = "Lowering cube into box ..."
+                        return
+                if not cube_transport_safe(f"carry{sub}", require_high_lift=True):
+                    if sub == 2 and cube_over_box_entry():
+                        print("    Transport grip degraded over box opening; "
+                              "lowering immediately instead of restarting search.")
+                        if update_place_plan_for_carried_offset(
+                                "degraded carry over box"):
+                            arm_ctrl.set_target(
+                                dynamic_ik_plan["place_drop"].angles,
+                                speed=SPEED_PLACE,
+                                min_frames=max(90, PLACE_DROP_MIN_FRAMES // 2),
+                            )
+                            carry_motion_frames = 0
+                            sub = 3
+                            status_msg = "Lowering cube into box after degraded carry ..."
+                            return
+                    if begin_transport_regrip(
+                            f"cube slipping during carry{sub}",
+                            resume_sub=sub):
+                        return
+                    diagnose_failure(f"cube slipping during carry{sub}")
+                    restart_search(f"cube slipping during carry{sub}")
+                    return
+            elif sub in (3, 4):
+                if cube_in_box_drop_corridor():
+                    transport_slip_abort_frames = 0
+                elif not cube_transport_safe(f"carry{sub}", require_high_lift=False):
+                    diagnose_failure(f"cube slipping during low placement{sub}")
+                    restart_search(f"cube slipping during low placement{sub}")
+                    return
+            if sub == -30:
+                ensure_transport_grip_hold("transport regrip")
+                update_visual_grip_feedback(
+                    "transport regrip",
+                    force=True,
+                )
+                skin = read_skin()
+                gripper_ctrl.maintain_tactile_force(
+                    skin,
+                    min_force=SKIN_HOLD_MIN_FORCE,
+                    target_force=SKIN_PRELIFT_READY_FORCE,
+                    max_force=SKIN_HOLD_MAX_FORCE,
+                    correction_scale=0.30,
+                )
+                transport_regrip_frames += 1
+                err, lifted = cube_carry_metrics()
+                lin_v, _ = cube_velocity_norms()
+                left_pad_hit, right_pad_hit, pad_contacts = pad_cube_contact_sides()
+                pair_skew, contact_center_err = finger_contact_alignment()
+                stable = (
+                    lifted > CARRY_MIN_LIFT and
+                    err <= CARRY_MAX_ERR and
+                    lin_v <= TRANSPORT_REGRIP_STABLE_SPEED and
+                    left_pad_hit and right_pad_hit and
+                    pad_contacts >= MIN_STABLE_FINGER_CONTACTS and
+                    pair_skew <= MAX_CONTACT_PAIR_SKEW and
+                    contact_center_err <= MAX_CONTACT_CENTER_ERR and
+                    skin_squeeze_ok(skin, SKIN_PRELIFT_READY_FORCE)
+                )
+                if stable:
+                    transport_regrip_stable_frames += 1
+                else:
+                    transport_regrip_stable_frames = max(
+                        0,
+                        transport_regrip_stable_frames - 1,
+                    )
+                if (transport_regrip_frames == 1 or
+                        transport_regrip_frames % 20 == 0):
+                    print(f"    Transport re-grip hold: "
+                          f"stable={transport_regrip_stable_frames}/"
+                          f"{TRANSPORT_REGRIP_STABLE_FRAMES} "
+                          f"err={err*100:.1f}cm lift={lifted*100:.1f}cm "
+                          f"v={lin_v:.3f}m/s contacts={pad_contacts} "
+                          f"left={left_pad_hit} right={right_pad_hit} "
+                          f"skin=({skin.left_force:.2f},"
+                          f"{skin.right_force:.2f})N")
+                if cube_inside_box():
+                    print("    Cube entered box during transport re-grip; "
+                          "switching to release.")
+                    phase = 7
+                    sub = 0
+                    return
+                if transport_regrip_stable_frames >= TRANSPORT_REGRIP_STABLE_FRAMES:
+                    print("    Transport re-grip stable; recomputing next "
+                          "short carry step.")
+                    reset_visual_grip_feedback("transport regrip stable")
+                    update_visual_grip_feedback(
+                        "transport regrip stable",
+                        force=True,
+                    )
+                    box_now = box_target_center()
+                    direct_after_regrip = (
+                        box_now is not None and
+                        box_entry_gap_xy(current_ball_xyz(), box_now) <=
+                        CARRY_STEP_FINAL_DIRECT_XY_M
+                    )
+                    if not update_place_plan_for_carried_offset(
+                            "transport regrip stable",
+                            direct_to_box=direct_after_regrip):
+                        diagnose_failure("transport regrip compensation failed")
+                        restart_search("transport regrip compensation failed")
+                        return
+                    transport_slip_abort_frames = 0
+                    if cube_over_box_entry():
+                        arm_ctrl.set_target(
+                            dynamic_ik_plan["place_drop"].angles,
+                            speed=SPEED_PLACE,
+                            min_frames=PLACE_DROP_MIN_FRAMES,
+                        )
+                        carry_motion_frames = 0
+                        sub = 3
+                        status_msg = "Lowering cube into box after re-grip ..."
+                    else:
+                        arm_ctrl.set_target(
+                            dynamic_ik_plan["place_above"].angles,
+                            speed=(
+                                SPEED_CARRY * 0.38
+                                if direct_after_regrip else SPEED_CARRY
+                            ),
+                            min_frames=(
+                                max(CARRY_STEP_MIN_FRAMES, 190)
+                                if direct_after_regrip else CARRY_STEP_MIN_FRAMES
+                            ),
+                        )
+                        carry_motion_frames = 0
+                        sub = max(1, transport_regrip_resume_sub)
+                        status_msg = "Continuing carry after re-grip ..."
+                    return
+                if transport_regrip_frames >= TRANSPORT_REGRIP_FRAMES:
+                    diagnose_failure("transport regrip failed")
+                    restart_search("transport regrip failed")
+                    return
+                return
+            if sub == -21:
+                if not arm_ctrl.done:
+                    status_msg = "Returning above box for visual re-localization ..."
+                    return
+                detected_box_pos = None
+                box_rgbd_scan_estimates = []
+                box_scan_targets = []
+                box_scan_idx = 0
+                box_scan_hint_xy_used = None
+                sub = -20
+                status_msg = "Re-localizing target box before release ..."
+                return
+            if sub == -20:
+                if not cube_is_secured():
+                    diagnose_failure("cube not secure before box scan")
+                    restart_search("cube not secure before box scan")
+                    return
+                box_scan_targets = generate_box_scan_targets(
+                    box_search_hint_xy,
+                    z_plane=HELD_BOX_SCAN_Z_PLANE,
+                )
+                box_scan_idx = 0
+                box_scan_hint_xy_used = (
+                    box_search_hint_xy.copy()
+                    if box_search_hint_xy is not None else None
+                )
+                print(f">>> Phase 6 : Locate target box while holding cube "
+                      f"({len(box_scan_targets)} candidate views, "
+                      f"hint={np.round(box_search_hint_xy, 3) if box_search_hint_xy is not None else None})")
+                sub = -19
+                status_msg = "Scanning for target box while holding cube ..."
+                return
+            if sub == -19:
+                box_xyz = capture_box_from_rgbd(
+                    "held-cube box current view",
+                    log_miss=(detected_box_pos is None),
+                )
+                if box_xyz is not None and accept_box_scan_estimate(
+                        box_xyz, "held-cube current view"):
+                    if update_place_plan_for_carried_offset(
+                            "box located while holding"):
+                        sub = 0
+                        return
+                    diagnose_failure("place compensation failed after box scan")
+                    restart_search("place compensation failed after box scan")
+                    return
+                if box_xyz is not None and reprioritize_box_scan_from_hint(
+                        "current view saw partial box"):
+                    return
+                while box_scan_idx < len(box_scan_targets):
+                    target = box_scan_targets[box_scan_idx]
+                    if not held_box_scan_target_is_safe(target):
+                        box_scan_idx += 1
+                        continue
+                    result = solve_gripper_center_ik(
+                        model, data, target.gripper,
+                        pinch_body_id, pinch_body_id, arm_joints,
+                        max_iter=700, tol=SCAN_POS_TOL,
+                        target_xmat=target.xmat, orientation_body_id=tool_id,
+                        orientation_weight=SCAN_ORI_WEIGHT, orientation_tol=SCAN_ORI_TOL,
+                    )
+                    if result.success:
+                        print(f"    Moving to held-cube box scan "
+                              f"{box_scan_idx+1}/{len(box_scan_targets)} "
+                              f"aim={np.round(target.aim, 3)}")
+                        arm_ctrl.set_target(
+                            result.angles,
+                            speed=SPEED_CARRY,
+                            min_frames=max(120, CARRY_MID_MIN_FRAMES // 2),
+                        )
+                        sub = -18
+                        status_msg = "Moving camera for box scan ..."
+                        return
+                    box_scan_idx += 1
+                if accept_partial_box_hint_for_place("held scan exhausted"):
+                    return
+                diagnose_failure("target box not found after held scan")
+                restart_search("target box not found after held scan")
+                return
+            if sub == -18:
+                if not cube_is_secured():
+                    diagnose_failure("cube dropped during held box scan")
+                    restart_search("cube dropped during held box scan")
+                    return
+                if not arm_ctrl.done:
+                    if arm_ctrl.near_done(SCAN_MOVING_CAPTURE_PROGRESS):
+                        box_xyz = capture_box_from_rgbd(
+                            f"moving held-cube box scan {box_scan_idx+1}",
+                            log_miss=False,
+                        )
+                        if box_xyz is not None and accept_box_scan_estimate(
+                                box_xyz, f"moving held-cube box scan {box_scan_idx+1}"):
+                            if update_place_plan_for_carried_offset(
+                                    "box located during held scan"):
+                                sub = 0
+                                return
+                            diagnose_failure("place compensation failed during box scan")
+                            restart_search("place compensation failed during box scan")
+                            return
+                        if box_xyz is not None and reprioritize_box_scan_from_hint(
+                                f"moving scan {box_scan_idx+1} saw partial box"):
+                            sub = -19
+                            return
+                    return
+                box_xyz = capture_box_from_rgbd(
+                    f"held-cube box scan {box_scan_idx+1}",
+                    log_miss=(detected_box_pos is None),
+                )
+                if box_xyz is not None and accept_box_scan_estimate(
+                        box_xyz, f"held-cube settled box scan {box_scan_idx+1}"):
+                    if update_place_plan_for_carried_offset(
+                            "box located after held scan"):
+                        sub = 0
+                        return
+                    diagnose_failure("place compensation failed after settled box scan")
+                    restart_search("place compensation failed after settled box scan")
+                    return
+                if box_xyz is not None and reprioritize_box_scan_from_hint(
+                        f"settled scan {box_scan_idx+1} saw partial box"):
+                    sub = -19
+                    return
+                if box_scan_idx >= len(box_scan_targets) - 1:
+                    if accept_partial_box_hint_for_place(
+                            f"settled scan {box_scan_idx+1} exhausted"):
+                        return
+                box_scan_idx += 1
+                sub = -19
+                return
             if sub == 0:
                 print(">>> Phase 6 : Carry via midpoint")
                 arm_ctrl.set_target(dynamic_ik_plan["carry_mid"].angles,
-                                    speed=SPEED_CARRY, min_frames=520)
+                                    speed=SPEED_CARRY, min_frames=CARRY_MID_MIN_FRAMES)
+                carry_motion_frames = 0
                 sub = 1
                 status_msg = "Carrying cube ..."
-            elif sub == 1 and arm_ctrl.done:
-                if not cube_is_secured():
+            elif sub == 1 and (
+                    arm_ctrl.done or
+                    (arm_ctrl.near_done(0.90) and
+                     carry_segment_can_advance(CARRY_MID_MIN_FRAMES)) or
+                    carry_segment_can_advance(CARRY_MID_MIN_FRAMES) or
+                    carry_motion_frames >= CARRY_MID_MIN_FRAMES + 120):
+                if not arm_ctrl.done:
+                    q_err, max_qvel = arm_ctrl.settle_metrics()
+                    print(f"    Carry midpoint accepted without full settle: "
+                          f"frames={carry_motion_frames} "
+                          f"qerr={q_err:.3f} qvel={max_qvel:.3f}")
+                if not (
+                        cube_transport_contact_ok() or
+                        cube_transport_relaxed_hold_ok() or
+                        cube_transport_geometry_hold_ok() or
+                        cube_transport_stiction_hold_ok()):
                     if cube_inside_box():
                         cube = current_ball_xyz()
                         print(f"    Cube already reached box during midpoint carry: "
                               f"{np.round(cube, 3)}")
                         phase = 7; sub = 0
                         return
+                    if begin_transport_regrip(
+                            "cube dropped before carry midpoint",
+                            resume_sub=1):
+                        return
                     diagnose_failure("cube dropped before carry midpoint")
                     restart_search("cube dropped before carry midpoint")
                     return
+                if not update_place_plan_for_carried_offset("carry midpoint"):
+                    diagnose_failure("place compensation failed at midpoint")
+                    restart_search("place compensation failed at midpoint")
+                    return
+                box_now = box_target_center()
+                carry_last_remaining_xy = (
+                    box_entry_gap_xy(current_ball_xyz(), box_now)
+                    if box_now is not None else float("inf")
+                )
+                carry_stall_steps = 0
                 print(">>> Phase 6a : Move above box")
                 arm_ctrl.set_target(dynamic_ik_plan["place_above"].angles,
-                                    speed=SPEED_CARRY, min_frames=560)
+                                    speed=SPEED_CARRY, min_frames=CARRY_STEP_MIN_FRAMES)
+                carry_motion_frames = 0
                 sub = 2
                 status_msg = "Moving above box ..."
-            elif sub == 2 and arm_ctrl.done:
-                if not cube_is_secured():
+            elif sub == 2 and (
+                    arm_ctrl.done or
+                    (arm_ctrl.near_done(0.90) and
+                     carry_segment_can_advance(CARRY_STEP_MIN_FRAMES)) or
+                    carry_segment_can_advance(CARRY_STEP_MIN_FRAMES) or
+                    carry_motion_frames >= CARRY_STEP_MIN_FRAMES + 120):
+                box_now = box_target_center()
+                cube_now = current_ball_xyz()
+                remaining_xy = (
+                    float(np.linalg.norm(box_now[:2] - cube_now[:2]))
+                    if box_now is not None else float("nan")
+                )
+                entry_gap_xy = (
+                    box_entry_gap_xy(cube_now, box_now)
+                    if box_now is not None else float("nan")
+                )
+                entry_ready = cube_over_box_entry()
+                drop_ready = cube_ready_for_guided_place_drop()
+                progress_xy = (
+                    carry_last_remaining_xy - entry_gap_xy
+                    if (math.isfinite(carry_last_remaining_xy) and
+                        math.isfinite(entry_gap_xy))
+                    else float("inf")
+                )
+                if (math.isfinite(progress_xy) and
+                        entry_gap_xy > TRANSPORT_STALL_PROGRESS_EPS_M and
+                        progress_xy < TRANSPORT_STALL_PROGRESS_EPS_M):
+                    carry_stall_steps += 1
+                else:
+                    carry_stall_steps = 0
+                carry_last_remaining_xy = entry_gap_xy
+                if not arm_ctrl.done:
+                    q_err, max_qvel = arm_ctrl.settle_metrics()
+                    print(f"    Carry step accepted without full settle: "
+                          f"frames={carry_motion_frames} "
+                          f"qerr={q_err:.3f} qvel={max_qvel:.3f} "
+                          f"remain_xy={remaining_xy*100:.1f}cm "
+                          f"entry_gap={entry_gap_xy*100:.1f}cm "
+                          f"progress={progress_xy*100:.1f}cm "
+                          f"stall={carry_stall_steps}/"
+                          f"{TRANSPORT_STALL_MAX_STEPS} "
+                          f"entry={entry_ready} drop_ready={drop_ready}")
+                if not (
+                        cube_transport_contact_ok() or
+                        cube_transport_relaxed_hold_ok() or
+                        cube_transport_geometry_hold_ok() or
+                        cube_transport_stiction_hold_ok()):
                     if cube_inside_box():
                         cube = current_ball_xyz()
                         print(f"    Cube already reached box during carry: "
                               f"{np.round(cube, 3)}")
                         phase = 7; sub = 0
                         return
+                    if cube_over_box_entry():
+                        print("    Carry reached box opening with weakening grip; "
+                              "lowering immediately.")
+                        if update_place_plan_for_carried_offset(
+                                "weak grip at box opening"):
+                            arm_ctrl.set_target(
+                                dynamic_ik_plan["place_drop"].angles,
+                                speed=SPEED_PLACE,
+                                min_frames=max(90, PLACE_DROP_MIN_FRAMES // 2),
+                            )
+                            carry_motion_frames = 0
+                            sub = 3
+                            status_msg = "Lowering cube into box ..."
+                            return
+                    if begin_transport_regrip(
+                            "cube dropped while carrying",
+                            resume_sub=2):
+                        return
                     diagnose_failure("cube dropped while carrying")
                     restart_search("cube dropped while carrying")
                     return
+                if not (cube_over_box_entry() or
+                        cube_ready_for_guided_place_drop()):
+                    force_high_clearance = (
+                        carry_stall_steps >= TRANSPORT_STALL_MAX_STEPS
+                    )
+                    direct_to_box = (
+                        entry_gap_xy <= CARRY_STEP_FINAL_DIRECT_XY_M or
+                        carry_stall_steps >= TRANSPORT_STALL_MAX_STEPS
+                    )
+                    context = (
+                        "carry stall recovery" if force_high_clearance
+                        else "carry step"
+                    )
+                    if not update_place_plan_for_carried_offset(
+                            context,
+                            direct_to_box=direct_to_box,
+                            high_clearance=force_high_clearance):
+                        diagnose_failure("carry step compensation failed")
+                        restart_search("carry step compensation failed")
+                        return
+                    print(">>> Phase 6a : Continue carry step toward box")
+                    if box_now is not None:
+                        remain_xy = float(np.linalg.norm(
+                            box_now[:2] - cube_now[:2]))
+                        entry_gap = box_entry_gap_xy(cube_now, box_now)
+                        print(f"    Next carry target: cube={np.round(cube_now, 4)} "
+                              f"box={np.round(box_now, 4)} "
+                              f"remain_xy={remain_xy*100:.1f}cm "
+                              f"entry_gap={entry_gap*100:.1f}cm "
+                              f"final_direct={CARRY_STEP_FINAL_DIRECT_XY_M*100:.1f}cm "
+                              f"direct={direct_to_box} high={force_high_clearance}")
+                    arm_ctrl.set_target(
+                        dynamic_ik_plan["place_above"].angles,
+                        speed=(
+                            SPEED_CARRY * 0.38
+                            if direct_to_box else SPEED_CARRY
+                        ),
+                        min_frames=(
+                            max(CARRY_STEP_MIN_FRAMES, 190)
+                            if direct_to_box else
+                            (
+                                max(CARRY_STEP_MIN_FRAMES, 105)
+                                if force_high_clearance else
+                                CARRY_STEP_MIN_FRAMES
+                            )
+                        ),
+                    )
+                    carry_motion_frames = 0
+                    status_msg = (
+                        "Recovering carry path over box ..."
+                        if force_high_clearance else
+                        "Carrying cube in short steps ..."
+                    )
+                    return
+                if not update_place_plan_for_carried_offset(
+                        "above box", direct_to_box=True):
+                    diagnose_failure("place compensation failed above box")
+                    restart_search("place compensation failed above box")
+                    return
                 print(">>> Phase 6b : Lower into box")
                 arm_ctrl.set_target(dynamic_ik_plan["place_drop"].angles,
-                                    speed=SPEED_PLACE, min_frames=340)
+                                    speed=SPEED_PLACE, min_frames=PLACE_DROP_MIN_FRAMES)
+                carry_motion_frames = 0
                 sub = 3
                 status_msg = "Lowering into box ..."
-            elif sub == 3 and arm_ctrl.done:
+            elif sub == 3 and (
+                    arm_ctrl.done or
+                    (arm_ctrl.near_done(0.90) and
+                     carry_segment_can_advance(
+                         PLACE_DROP_MIN_FRAMES,
+                         qerr_limit=0.20,
+                         qvel_limit=0.28,
+                     )) or
+                    carry_segment_can_advance(
+                        PLACE_DROP_MIN_FRAMES,
+                        qerr_limit=0.20,
+                        qvel_limit=0.28,
+                    ) or
+                    carry_motion_frames >= PLACE_DROP_MIN_FRAMES + 120):
+                if not arm_ctrl.done:
+                    q_err, max_qvel = arm_ctrl.settle_metrics()
+                    print(f"    Place drop accepted without full settle: "
+                          f"frames={carry_motion_frames} "
+                          f"qerr={q_err:.3f} qvel={max_qvel:.3f}")
                 if not cube_is_secured():
                     if cube_inside_box():
                         cube = current_ball_xyz()
@@ -3942,20 +7143,145 @@ def main() -> None:
                               f"{np.round(cube, 3)}")
                         phase = 7; sub = 0
                         return
-                    diagnose_failure("cube dropped before release")
-                    restart_search("cube dropped before release")
+                    if cube_in_box_drop_corridor():
+                        print("    Grip weakened inside box drop corridor; "
+                              "continuing release-window correction instead of "
+                              "global restart.")
+                    else:
+                        diagnose_failure("cube dropped before release")
+                        restart_search("cube dropped before release")
+                        return
+                ready, reason = cube_release_window(require_box_support=False)
+                if not ready:
+                    if place_correction_count < MAX_PLACE_CORRECTIONS:
+                        place_correction_count += 1
+                        print(f"    Place release correction "
+                              f"{place_correction_count}/{MAX_PLACE_CORRECTIONS}: "
+                              f"{reason}")
+                        if update_place_plan_for_carried_offset(
+                                "release-window correction"):
+                            arm_ctrl.set_target(
+                                dynamic_ik_plan["place_drop"].angles,
+                                speed=SPEED_PLACE,
+                                min_frames=max(90, PLACE_DROP_MIN_FRAMES // 2),
+                            )
+                            carry_motion_frames = 0
+                            status_msg = "Correcting cube into box ..."
+                            return
+                    print(f"    Refusing to release outside low target window: {reason}")
+                    diagnose_failure("place drop target not reached")
+                    restart_search("place drop target not reached")
                     return
+                print(f"    Place drop ready: {reason}")
+                place_settle_frames = 0
+                sub = 4
+                status_msg = "Settling cube low in box before release ..."
+            elif sub == 4:
+                if not cube_is_secured():
+                    if cube_inside_box():
+                        cube = current_ball_xyz()
+                        print(f"    Cube settled in box before opening gripper: "
+                              f"{np.round(cube, 3)}")
+                        phase = 7; sub = 0
+                        return
+                    diagnose_failure("cube dropped during pre-release settle")
+                    restart_search("cube dropped during pre-release settle")
+                    return
+                low_ready, low_reason = cube_release_window(require_box_support=False)
+                ready, reason = cube_release_window()
+                if not low_ready:
+                    if place_correction_count < MAX_PLACE_CORRECTIONS:
+                        place_correction_count += 1
+                        print(f"    Pre-release correction "
+                              f"{place_correction_count}/{MAX_PLACE_CORRECTIONS}: "
+                              f"{low_reason}")
+                        if update_place_plan_for_carried_offset(
+                                "pre-release correction"):
+                            arm_ctrl.set_target(
+                                dynamic_ik_plan["place_drop"].angles,
+                                speed=SPEED_PLACE,
+                                min_frames=max(90, PLACE_DROP_MIN_FRAMES // 2),
+                            )
+                            carry_motion_frames = 0
+                            place_settle_frames = 0
+                            sub = 3
+                            status_msg = "Correcting low release pose ..."
+                            return
+                    print(f"    Pre-release settle left target window: {low_reason}")
+                    diagnose_failure("cube left place release window")
+                    restart_search("cube left place release window")
+                    return
+                if not ready:
+                    place_settle_frames += 1
+                    if place_settle_frames % 20 == 1:
+                        print(f"    Waiting for box-bottom support before release "
+                              f"{place_settle_frames}/{PLACE_SETTLE_HOLD_FRAMES}: "
+                              f"{reason}")
+                    if place_settle_frames < PLACE_SETTLE_HOLD_FRAMES:
+                        return
+                    print(f"    No box-bottom support at release pose: {reason}")
+                    diagnose_failure("release pose has no box-bottom support")
+                    if (place_support_rescan_count < MAX_PLACE_SUPPORT_RESCANS and
+                            "place_above" in dynamic_ik_plan):
+                        place_support_rescan_count += 1
+                        print("    Re-localizing target box while holding cube; "
+                              "release is blocked until box-bottom support is confirmed "
+                              f"({place_support_rescan_count}/"
+                              f"{MAX_PLACE_SUPPORT_RESCANS}).")
+                        arm_ctrl.set_target(
+                            dynamic_ik_plan["place_above"].angles,
+                            speed=SPEED_PLACE,
+                            min_frames=max(90, PLACE_ABOVE_MIN_FRAMES // 2),
+                        )
+                        carry_motion_frames = 0
+                        detected_box_pos = None
+                        box_rgbd_scan_estimates = []
+                        place_settle_frames = 0
+                        sub = -21
+                        status_msg = "No box support; re-scanning box while holding ..."
+                        return
+                    print("    Box-bottom contact is still missing after the bounded "
+                          "re-scan. Low XY/Z window is valid, so proceeding with a "
+                          "guarded slow release to let the cube settle into the box.")
+                    place_release_support_override = True
+                    phase = 7
+                    sub = 0
+                    status_msg = "Guarded low release inside box ..."
+                    return
+                place_settle_frames += 1
+                if place_settle_frames % 20 == 1:
+                    print(f"    Pre-release low hold "
+                          f"{place_settle_frames}/{PLACE_SETTLE_HOLD_FRAMES}: "
+                          f"{reason}")
+                if place_settle_frames < PLACE_SETTLE_HOLD_FRAMES:
+                    return
+                place_release_support_override = False
                 phase = 7; sub = 0
         elif phase == 7:
             if sub == 0:
                 print(">>> Phase 7 : Release into box")
+                require_support = not place_release_support_override
+                ready, reason = cube_release_window(
+                    require_box_support=require_support,
+                )
+                if not ready:
+                    print(f"    Release blocked: {reason}")
+                    diagnose_failure("release requested outside box")
+                    place_release_support_override = False
+                    restart_search("release requested outside box")
+                    return
+                if place_release_support_override:
+                    print(f"    Guarded low release without prior box-bottom "
+                          f"contact: {reason}")
                 release_cube_static_anchor("release in box")
                 release_grip_lock("release in box")
                 dynamic_grasp_xmat = None
                 dynamic_grasp_z_offset = INITIAL_GRASP_Z_OFFSET
-                gripper_ctrl.open(duration_frames=25)
+                carried_cube_offset = None
+                place_release_support_override = False
+                gripper_ctrl.open(duration_frames=PLACE_RELEASE_OPEN_FRAMES)
                 sub = 1
-                status_msg = "Releasing ..."
+                status_msg = "Softly opening gripper in box ..."
             elif sub == 1 and gripper_ctrl.done:
                 box_verify_left = BOX_VERIFY_FRAMES
                 sub = 2
@@ -3976,6 +7302,7 @@ def main() -> None:
         elif phase == 8:
             if sub == 0:
                 print(f">>> Phase 8 : Re-grasp ({regrasp_count}/{MAX_REGRASP})")
+                carried_cube_offset = None
                 release_grip_lock("re-grasp")
                 gripper_ctrl.open(duration_frames=20)
                 sub = 1
@@ -3983,7 +7310,19 @@ def main() -> None:
                 if not gripper_ctrl.done or not arm_ctrl.done:
                     return
                 # Wait for cube to settle (velocity below threshold)
-                bv = float(np.linalg.norm(data.qvel[ball_dof_adr:ball_dof_adr+3]))
+                bv, bw = cube_velocity_norms()
+                cube_now = current_ball_xyz()
+                if (cube_now[2] > CUBE_STATIC_ANCHOR_MAX_Z and
+                        not cube_inside_box()):
+                    recovery_wait_frames = 0
+                    recovery_stable_frames = 0
+                    recovery_reason = "local re-grasp high cube"
+                    gripper_ctrl.open(duration_frames=HIGH_CUBE_RECOVERY_OPEN_FRAMES)
+                    sub = 10
+                    status_msg = (
+                        "Cube is high after failed grasp; waiting for it to settle ..."
+                    )
+                    return
                 if bv < 0.02:
                     print(f"    Cube settled (|v|={bv:.3f} m/s)")
                     if cube_inside_box():
@@ -3998,6 +7337,8 @@ def main() -> None:
                             "local re-grasp RGB-D reacquire failed")
                         return
                     detected_ball_pos = fresh.copy()
+                    box = box_for_pregrasp_replan(
+                        detected_ball_pos, "Local re-grasp")
                     z_offs = GRASP_Z_OFFSETS[
                         min(regrasp_count, len(GRASP_Z_OFFSETS) - 1)]
                     previous_xmat = (
@@ -4005,6 +7346,7 @@ def main() -> None:
                     )
                     replanned = compute_dynamic_ik(
                         detected_ball_pos,
+                        box,
                         grasp_z_offs=z_offs,
                         opening_hints=detected_opening_hints,
                         preview_top_k=LOCAL_PHYSICAL_EVAL_TOP_K,
@@ -4024,6 +7366,62 @@ def main() -> None:
                     return
                 else:
                     status_msg = f"Waiting for cube to settle (|v|={bv:.3f}) ..."
+            elif sub == 10:
+                release_cube_static_anchor("high-cube recovery")
+                if not gripper_ctrl.done:
+                    status_msg = "Opening gripper for high-cube recovery ..."
+                    return
+                recovery_wait_frames += 1
+                cube_now = current_ball_xyz()
+                bv, bw = cube_velocity_norms()
+                transport_recovery = any(
+                    key in recovery_reason for key in (
+                        "carry",
+                        "transport",
+                        "release",
+                        "place",
+                        "box",
+                        "slipping",
+                        "dropped",
+                    )
+                )
+                recovery_floor_z = (
+                    CUBE_REST_Z + 0.004
+                    if transport_recovery else CUBE_STATIC_ANCHOR_MAX_Z
+                )
+                near_recovery_floor = cube_now[2] <= recovery_floor_z
+                low_motion = (
+                    bv <= HIGH_CUBE_SETTLE_SPEED and
+                    bw <= HIGH_CUBE_SETTLE_ANG_SPEED
+                )
+                if near_recovery_floor and low_motion:
+                    recovery_stable_frames += 1
+                else:
+                    recovery_stable_frames = 0
+                if recovery_wait_frames == 1 or recovery_wait_frames % 25 == 0:
+                    print(f"    High cube recovery: cube={np.round(cube_now, 4)} "
+                          f"|v|={bv:.3f} |w|={bw:.3f} "
+                          f"stable={recovery_stable_frames}/"
+                          f"{HIGH_CUBE_SETTLE_FRAMES} "
+                          f"reason={recovery_reason}")
+                if recovery_stable_frames >= HIGH_CUBE_SETTLE_FRAMES:
+                    print("    Cube recovered to table-height; restarting RGB-D scan.")
+                    set_cube_static_anchor("high-cube recovery settled")
+                    phase = 0
+                    sub = 0
+                    status_msg = "Cube settled; rescanning ..."
+                    return
+                if recovery_wait_frames >= HIGH_CUBE_SETTLE_TIMEOUT_FRAMES:
+                    print("    High cube recovery timed out; rescanning without "
+                          "static anchor so RGB-D can localize the current pose.")
+                    phase = 0
+                    sub = 0
+                    status_msg = "Recovery timeout; rescanning current cube pose ..."
+                    return
+                status_msg = (
+                    "Waiting for high cube to fall/settle "
+                    f"z={cube_now[2]:.3f} |v|={bv:.3f} ..."
+                )
 
         # 鈹€鈹€ Phase 9:  done 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
         elif phase == 9:
@@ -4043,9 +7441,15 @@ def main() -> None:
         viewer.cam.elevation = -25
         viewer.cam.lookat[:] = [0.26, 0.0, 0.16]
 
-        workspace_drawn = False
+        scene_annotations_ready = False
         frame = 0
         last_skin_reading = read_skin()
+        auto_start_demo = os.environ.get("SYNRIA_AUTO_START", "").lower() in {
+            "1", "true", "yes", "on",
+        }
+        auto_exit_when_done = os.environ.get("SYNRIA_AUTO_EXIT", "").lower() in {
+            "1", "true", "yes", "on",
+        }
 
         # Warmup 鈥?settle physics
         for _ in range(30):
@@ -4055,6 +7459,10 @@ def main() -> None:
 
         while viewer.is_running():
             frame_start = time.perf_counter()
+
+            if auto_start_demo and phase == -1 and start_act_id >= 0:
+                data.ctrl[start_act_id] = START_TRIGGER_THRESHOLD
+                auto_start_demo = False
 
             # 鈹€鈹€ 1. Input: slider-based cube placement + START 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
             if phase == -1 and cube_x_act_id >= 0:
@@ -4086,6 +7494,21 @@ def main() -> None:
                     set_cube_static_anchor("start")
                     pregrasp_replan_count = 0
                     local_replan_count = 0
+                    place_settle_frames = 0
+                    place_correction_count = 0
+                    place_support_rescan_count = 0
+                    place_release_support_override = False
+                    prelift_hold_frames = 0
+                    prelift_ready_frames = 0
+                    carried_cube_offset = None
+                    detected_ball_pos = None
+                    detected_box_pos = None
+                    rgbd_scan_estimates = []
+                    box_rgbd_scan_estimates = []
+                    box_search_hint_xy = None
+                    box_scan_targets = []
+                    box_scan_idx = 0
+                    box_scan_hint_xy_used = None
                     dynamic_grasp_xmat = None
                     dynamic_grasp_z_offset = INITIAL_GRASP_Z_OFFSET
                     rejected_grasp_frames = []
@@ -4149,12 +7572,17 @@ def main() -> None:
             stabilize_cube_at_rest()
 
             # 鈹€鈹€ 5. Workspace spheres (once) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
-            if not workspace_drawn and workspace_pts:
-                try:
-                    render_workspace_spheres(viewer, workspace_pts)
-                    workspace_drawn = True
-                except Exception:
-                    pass
+            try:
+                render_scene_annotations(
+                    viewer,
+                    workspace_pts,
+                    detected_ball_pos,
+                    box_target_center(),
+                )
+                scene_annotations_ready = True
+            except Exception as exc:
+                if not scene_annotations_ready:
+                    print(f"Scene annotation init: {exc}")
 
             # 鈹€鈹€ 6. Displays (throttled) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
             if frame % SKIN_EVERY_N == 0:
@@ -4183,6 +7611,9 @@ def main() -> None:
                 viewer.sync()
             except Exception:
                 pass
+
+            if auto_exit_when_done and finished:
+                break
 
             frame += 1
 

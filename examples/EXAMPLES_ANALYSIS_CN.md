@@ -1,299 +1,291 @@
-# examples 目录代码全链路深度解析（MuJoCo / PyBullet）
+# 04_workspace 机械臂 RGB-D 抓取与柔顺放置说明
 
-> 目标：把 `examples/` 下的“抓取演示”从**入口脚本**、**模型注入**、**运动学求解**、**轨迹生成**、**接触与力反馈**到**视觉渲染**完整讲清楚。既讲专业术语，也讲直观理解。
+更新时间：2026-06-09
 
----
+本文对应主要代码：
 
-## 1. 代码分层与主链路
-
-`examples/` 可以抽象成四层：
-
-1. **场景层（Scene）**：加载机械臂模型、往 XML 注入球/传感器/相机/执行器。  
-2. **规划层（Planning）**：用 IK 计算“靠近→抓取→抬升→放置”的关键姿态。  
-3. **控制层（Control）**：用平滑插值发关节目标；夹爪渐进闭合并依据力阈值停止。  
-4. **感知层（Perception）**：读力/力矩与触觉，做低通滤波，显示曲线；相机显示 RGB/RGB-D。
-
-其中最“模块化”的主链路在：
+- `examples/04_workspace/run.py`
 - `examples/common/model_loader.py`
-- `examples/common/ik_solver.py`
-- `examples/common/motion.py`
-- `examples/common/force_sensor.py`
 - `examples/common/camera.py`
+- `examples/common/force_sensor.py`
 
-而 `examples/complete_grasping_demo_mujoco.py` 是“单文件整合版”（很多逻辑与 common 模块同源）。
+目标任务：机械臂使用腕部 RGB-D 双目深度相机自主识别红色正方体和蓝色放置盒，在可达范围内以稳定姿态一次性抓取正方体，并柔顺地放入蓝色放置盒内。
 
----
+## 1. 当前任务流程
 
-## 2. 运行流程总览（时序图）
+整体状态机如下：
 
-```mermaid
-flowchart TD
-    A[启动 demo 脚本] --> B[load_and_inject 读取 MJCF]
-    B --> C[注入 option/camera/ball/sensor/actuator]
-    C --> D[创建 MjModel + MjData]
-    D --> E[识别 arm_joints 与 gripper_joints]
-    E --> F[build_gripper_limits 自动判定开合方向]
-    F --> G[build_ik_plan 生成 approach/grasp/lift/place]
-    G --> H{IK 全部可达?}
-    H -- 否 --> X[打印不可达并退出/降级]
-    H -- 是 --> I[move_arm_to_angles 到 approach]
-    I --> J[move_arm_to_angles 到 grasp]
-    J --> K[close_gripper 渐进闭合 + 力阈值停]
-    K --> L[move_arm_to_angles 到 lift]
-    L --> M[move_arm_to_angles 到 place]
-    M --> N[open_gripper 放置]
-    N --> O[可视化/传感器循环更新]
+| Phase | 作用 | 关键判断 |
+| --- | --- | --- |
+| `-1` | 空闲，允许移动正方体初始位置 | `start_demo` 或 `SYNRIA_AUTO_START=1` 触发 |
+| `0` | RGB-D 扫描红色正方体和蓝色放置盒 | 只接受满足 D405C 深度范围、点云稳定性、尺寸门控的结果 |
+| `2` | 移动到抓取上方 approach 位姿 | IK 必须同时满足位置和姿态，不使用错误姿态的 position-only fallback |
+| `3` | 垂直下降到抓取高度 | 闭合前检查夹爪中心与正方体中心误差 |
+| `4` | 柔顺闭合夹爪 | 电子皮肤力反馈 + 真实接触点共同判断是否夹住 |
+| `5` | 抬升并验证抓取 | 检查双侧接触、皮肤力、视觉滑移和正方体抬升高度 |
+| `6` | 搬运到蓝色盒上方并低位进入盒内 | 搬运中持续夹持力闭环，必要时重定位蓝盒 |
+| `7` | 低位柔顺释放 | 只有方块进入盒内、接近盒底支撑窗口后才逐步开爪 |
+| `8` | 局部重抓/恢复 | 失败后等待方块稳定，再重新识别和规划 |
+| `9` | 完成 | 验证方块位于盒内 |
+
+## 2. 坐标系说明
+
+代码和可视化中标注的坐标均为 `base/world` 坐标系：
+
+- 原点：机械臂底座中心。
+- `X/Y`：桌面平面内坐标。
+- `Z`：竖直向上。
+- 单位：米。
+
+本次新增可视化后，识别到红色正方体或蓝色放置盒时：
+
+- MuJoCo 主视窗会在物体旁边显示 `base/world xyz=(x,y,z)m`。
+- 同时显示 `LWH=(长,宽,高)mm`。
+- 红色正方体和蓝色放置盒外轮廓会用黄色虚线沿 3D 棱边绘制。
+- RGB-D 相机窗口也会投影同样的黄色虚线边框和坐标/尺寸文字。
+- 这些标注只在 `viewer.user_scn` 和 OpenCV 图像中绘制，不参与碰撞，不影响物理仿真。
+
+## 3. RGB-D 双目深度相机参数
+
+按用户提供的 Intel D405C 参数设置：
+
+| 参数 | 当前值 | 说明 |
+| --- | --- | --- |
+| 深度分辨率 | `640 x 360 @ 90fps` | 仿真窗口使用该深度尺寸 |
+| RGB 分辨率 | `1280 x 720 @ 90fps` | 记录为硬件参数；仿真渲染按窗口尺寸运行 |
+| 深度视场角 | `87 deg x 58 deg` | 用于深度反投影和 3D 投影标注 |
+| 工作范围 | `0.07 m - 0.50 m` | 小于 7cm 或大于 50cm 的深度不参与识别 |
+| 最小检测目标 | `0.001 m @ 0.07 m` | 记录为硬件能力 |
+| 深度精度 | `±2% @ 0.50 m` | 用于理解误差来源 |
+| 快门 | 全局快门 | 与 D405C 参数一致 |
+| 处理器 | Intel RealSense D4 | 记录为硬件参数 |
+
+当前腕部相机安装参数：
+
+| 参数 | 当前值 | 说明 |
+| --- | --- | --- |
+| 安装位置 | `WRIST_CAMERA_LOCAL_POS = [0.090, 0.000, 0.092]` | 位于 Link6/夹爪根部局部坐标，符合截图中红圈安装区域 |
+| 看向位置 | `WRIST_CAMERA_LOOK_AT_LOCAL = [0.0002, 0.0000, 0.13098]` | 看向两指中间的夹爪中心附近 |
+| 相机名 | `wrist_rgb` | RGB 和深度共用同一外参 |
+| 更新频率 | `CAMERA_EVERY_N = 1` | 仿真主循环 50Hz，每帧都可更新；硬件上限为 90Hz |
+
+## 4. 电子皮肤力反馈传感器参数
+
+按用户提供的夹爪两内侧电力皮肤传感器参数设置：
+
+| 参数 | 当前值 |
+| --- | --- |
+| 最小识别力 | `0.1 N` |
+| 量程 | `0 - 20 N` |
+| 允许过载 | `>=250%` |
+| 力分辨率 | `<=0.1 N` |
+| 传感点间距 | `>=0.2 mm` |
+| 响应时间 | `<=25 ms` |
+| 电压 | `5 V` |
+| 通讯协议 | `RS485` |
+
+代码参数：
+
+| 参数 | 当前值 | 作用 |
+| --- | --- | --- |
+| `SKIN_FORCE_MIN_RECOGNITION_N` | `0.1` | 小于该值视为无接触 |
+| `SKIN_FORCE_RANGE_MAX_N` | `20.0` | 单侧传感器量程上限 |
+| `SKIN_FORCE_RESOLUTION_N` | `0.1` | 力值量化分辨率 |
+| `SKIN_RESPONSE_TIME_S` | `0.025` | 响应时间 |
+| `SKIN_HOLD_MIN_FORCE` | `12.8 N` | 搬运中每侧最低持物力，匹配去掉假块后的真实手指 mesh 接触能力 |
+| `SKIN_HOLD_TARGET_FORCE` | `13.5 N` | 正常持物目标力，实测可稳定达到 |
+| `SKIN_HOLD_MAX_FORCE` | `20.0 N` | 柔顺闭环最大目标，不超过量程 |
+| `SKIN_PRELIFT_READY_FORCE` | `13.5 N` | 抬升前必须连续达到的确认力 |
+| `SKIN_BALANCE_MAX_RATIO` | `0.80` | 左右力差过大时不认为稳定 |
+
+重要改动：夹爪上两个看起来像“阴影块”的 `left/right_inner_pad_collision` 已移除。真实世界中不存在这两个物理块，因此当前仿真不再注入它们，也不让它们参与碰撞或托举正方体。电子皮肤现在只保留为隐藏的 `left/right_inner_skin_site` 感应区域，力反馈来自可见手指 mesh 与正方体的真实接触点。
+
+## 5. 目标物体参数
+
+红色正方体：
+
+| 参数 | 当前值 |
+| --- | --- |
+| 边长 | `40 mm` |
+| 半尺寸 | `CUBE_HALF_SIZE = 0.020 m` |
+| 质量 | `0.060 kg` |
+| 初始静置高度 | `CUBE_REST_Z = 0.023 m` |
+| 摩擦 | `28.0 12.0 6.0` |
+
+蓝色放置盒：
+
+| 参数 | 当前值 |
+| --- | --- |
+| 外部半尺寸 | `BOX_SIZE = [0.070, 0.070, 0.040] m` |
+| 外部尺寸 | `140 x 140 x 80 mm` |
+| 壁厚 | `BOX_WALL = 0.005 m` |
+| 盒底支撑检测 | `PLACE_REQUIRE_BOX_BOTTOM_CONTACT = True` |
+
+说明：仿真中蓝色盒必须存在于场景里，但抓取/放置规划不直接使用内置 `BOX_POS` 作为最终目标。代码会先用 RGB-D 检测蓝盒位置，只有蓝盒 RGB-D 估计通过尺寸、面积、稳定性和 hint 偏差门控后，才会作为放置目标。
+
+## 6. RGB-D 识别逻辑
+
+红色正方体识别：
+
+1. 使用 RGB 颜色阈值找红色区域。
+2. 使用 D405C 深度图反投影生成点云。
+3. 对可见面拟合平面，并向物体内部补偿半个方块边长。
+4. 多候选估计取稳健中值。
+5. 在抓取前，如果方块静置在桌面，则将 `Z` 约束回 `CUBE_REST_Z`，避免侧面可见面导致中心高度漂移。
+
+蓝色放置盒识别：
+
+1. 使用蓝色 HSV 与 RGB 蓝色优势共同生成 mask。
+2. 使用深度点云估计盒壁/盒底可见区域。
+3. 根据已知盒尺寸补齐被遮挡的边界中心。
+4. 检查点云范围、面积、盒体尺寸和 footprint inside ratio。
+5. 若有历史扫描 hint，则新估计与 hint 的 XY 偏差必须小于 `BOX_HINT_MAX_DEVIATION_M = 0.030 m`。
+
+## 7. 抓取姿态优化
+
+用户指出的问题：机械臂虽然能靠近正方体，但经常夹住两条棱边，接触面积小、受力不稳，不符合真实平行夹爪抓取规律。
+
+本次改动：
+
+| 参数/逻辑 | 当前值 | 目的 |
+| --- | --- | --- |
+| 抓取开口候选 | 只保留世界 `+X/-X/+Y/-Y` | 让两指夹住正方体两个相对面 |
+| 斜向开口候选 | 已从第一抓取候选中移除 | 避免夹两条棱 |
+| `GRASP_WORLD_AXIS_WEIGHT` | `180.0` | 强化 X/Y 面接触优先级 |
+| `GRASP_DIAGONAL_OPENING_WEIGHT` | `700.0` | 强惩罚对角夹棱姿态 |
+| `GRASP_TRANSPORT_AXIS_WEIGHT` | `45.0` | 仍考虑搬运方向，但不再压过面接触 |
+| `PREFERRED_GRASP_Z_OFFSET` | `0.000 m` | 夹爪中心对准正方体几何中心，避免只夹上沿或两条棱边 |
+| `GRASP_Z_OFFSETS` | `[0.000, 0.004, -0.002, 0.008]` | 优先中部面接触，失败后只做小范围上下重试 |
+
+持物稳定性补充参数：
+
+| 参数 | 当前值 | 说明 |
+| --- | --- | --- |
+| 可见手指 mesh 摩擦 | `80.0 30.0 12.0` | 将电力皮肤/橡胶表面的高摩擦体现到真实手指几何上，不新增假碰撞块 |
+| `GRIP_HOLD_FRAMES` | `150` | 闭合后给力控更多时间建立真实法向力 |
+| `GRIP_PRELIFT_MIN_FRAMES` | `60` | 抬升前最少稳定保持帧数 |
+| `GRIP_PRELIFT_READY_FRAMES` | `16` | 连续达到 `13.5N` 后才允许抬升 |
+| `SPEED_LIFT` | `0.32` | 抬升速度，兼顾效率和不滑落 |
+| `SPEED_CARRY` | `0.24` | 搬运速度，降低方块沿夹持面滑移的加速度冲击 |
+| `CARRY_MID_MIN_FRAMES` | `260` | 搬运到中点的最少平滑帧 |
+| `PLACE_ABOVE_MIN_FRAMES` | `280` | 到盒上方的最少平滑帧 |
+| `GRASP_LIFT_HEIGHT` | `0.105 m` | 抬升高度，不再过度上抬 |
+| `PLACE_ABOVE_HEIGHT` | `0.070 m` | 盒上方等待高度，方块中心约为 `0.130 m`，高于盒沿且减少悬空搬运 |
+| `CARRY_STEP_MAX_XY_M` | `0.040 m` | 搬运到盒口前每个短步最大 XY 位移 |
+| `CARRY_STEP_MIN_FRAMES` | `135` | 每个短步最少平滑帧 |
+| `LIFT_MIN_FRAMES + 55` | `210` | 抬升达到安全高度并确认双侧接触后可提前进入验证，不再等待完全关节 settle |
+
+当前原则：
+
+- 夹爪从正方体上方垂直下降。
+- 闭合前夹爪中心必须接近正方体中心。
+- 夹爪开口轴必须与世界 X/Y 轴对齐，优先夹两个完整侧面。
+- 不再为了搬运方向选择斜向夹棱。
+
+## 8. 柔顺夹持与防滑逻辑
+
+闭合阶段：
+
+- 夹爪以有限速度闭合。
+- 电子皮肤达到接触力后进入预抬升等待。
+- 双侧都需要真实接触，不接受单侧接触。
+- 接触点必须落在左右手指内侧 skin site 区域内。
+
+搬运阶段：
+
+- `maintain_fused_grip_force()` 同时使用电子皮肤和视觉滑移信息。
+- 视觉发现滑移时，提高最低力和目标力，但不超过 `20 N`。
+- 若视觉短时遮挡，但触觉双侧稳定且方块仍在合理几何范围内，不会误开爪。
+- 若视觉能看到方块已经明显下滑，即使电子皮肤读数仍较高，也不能直接进入搬运。
+  抬升严格确认只允许 `slip <= 12 mm` 且 `drop <= 6 mm` 的触觉兜底；搬运保持只允许 `slip <= 18 mm` 且 `drop <= 10 mm` 的触觉兜底。
+- 搬运中新增实时滑移保护：`slip > 26 mm` 或 `drop > 16 mm` 连续 3 帧会立即停止该路径并重抓；`slip > 38 mm` 或 `drop > 28 mm` 会单帧立即触发。
+- 搬运中点和盒上方结束检查改用 `cube_transport_contact_ok()`：要求双侧真实接触、接触斑块足够、皮肤力有效、方块仍在夹爪附近；视觉小幅下移作为释放补偿量处理，不再直接套用抬升阶段的严格视觉阈值。
+- 若搬运到盒口上方时夹持开始变弱，`cube_over_box_entry()` 会优先触发低速下放，而不是回到全局搜索，避免方块已经对准蓝盒却在空中来回循环。
+- 当方块已经在盒口上方且视觉权重较高、下移超过 `10 mm` 时，会主动切入 `place_drop`，不等夹持力进一步变差。
+- 在 `place_drop` 低位下降阶段，只要方块处于蓝盒 XY 下降通道内，就以释放窗口修正为准，不再用搬运阶段的滑移阈值中断。
+- 长距离搬运不再从中点一次性移动到盒上方；`carry_step_cube_target()` 会把剩余 XY 距离切成不超过 `55 mm` 的短步，每步后重新计算 carried offset。
+
+释放阶段：
+
+- 机械臂先把正方体低位送入盒内。
+- `cube_release_window()` 检查 XY 是否在盒内、Z 是否接近盒底释放高度。
+- 若要求盒底支撑，则必须检测到 `box_bottom` 接触。
+- 满足条件后才慢慢打开夹爪，避免半空中直接释放。
+
+## 9. 本次代码改动点
+
+本次针对用户最新反馈做了以下更新：
+
+1. 移除夹爪两侧不真实的“阴影块”
+   - 删除 XML 注入中的 `left_inner_pad_collision / right_inner_pad_collision`。
+   - 保留 `left_inner_skin_site / right_inner_skin_site` 作为力反馈感应区域。
+   - 可见手指 mesh `Link7/Link8` 才是唯一夹持接触体。
+
+2. 抓取姿态改为正方体面接触
+   - `generate_grasp_orientations()` 不再生成斜向开口。
+   - RGB-D 提供的开口 hint 会先吸附到世界 X/Y 轴。
+   - 评分中增加对角开口惩罚，避免夹棱。
+
+3. 增加识别结果可视化
+   - MuJoCo 主视窗用黄色虚线绘制红色正方体和蓝色盒的 3D 棱边。
+   - 物体旁边显示 `base/world` 坐标和 LWH 尺寸。
+   - 主视窗标出 `base/world frame origin: robot base center`。
+   - RGB-D 相机窗口同步绘制投影虚线边框和文字。
+
+4. 文档重写
+   - 删除历史冲突内容。
+   - 将硬件参数、算法流程、关键阈值和当前改动集中说明。
+
+5. 去掉假块后的真实持物稳定性补强
+   - 抬升前必须达到 `SKIN_PRELIFT_READY_FORCE = 13.5N`，这是去掉假块后真实可见手指 mesh 能稳定达到的双侧力。
+   - 持物目标为 `13.5N`，搬运中视觉检测到滑移时仍可向 `20N` 量程上限补力。
+   - 高摩擦只配置在可见手指 mesh 和红色正方体材料上，不新增物理块。
+   - 搬运速度略降，并更新 `carry_midpoint_for_grasp()`：中点方向仍优先考虑夹持法向，但第一段 XY 位移同样被 `CARRY_STEP_MAX_XY_M` 截断，避免移动初始位置时第一段过长。
+   - `cube_is_secured(strict_visual=True)` 收紧触觉兜底：视觉下滑超过 `6 mm` 或横向滑移超过 `12 mm` 时，不再因为皮肤力较高而判定抓稳，避免方块已经滑到棱边仍继续搬运。
+   - 新增 `cube_transport_safe()` 和 `cube_transport_contact_ok()`：搬运中只要 RGB-D 视觉连续确认方块相对夹爪滑移过大，就立即终止路径；普通 8-12mm 的可补偿下移则继续闭环夹持并传给放置位姿补偿，避免误判后陷入重复搜索。
+   - Phase 5 抬升验证新增安全高度提前出口：当抬升帧数超过 `LIFT_MIN_FRAMES + 55`、方块达到 `GRASP_LIFT_HEIGHT * 0.78` 以上且搬运接触仍有效时，直接进入抓取验证，避免长时间等待关节完全静止造成“卡住”的视觉效果。
+   - `demo_tick()` 已声明 `lift_motion_frames` 为 `nonlocal`，确保抬升计数器在状态机内可正常更新。
+   - 新增 `cube_over_box_entry()`：当方块已经位于蓝盒开口 XY 范围内且仍在释放高度上方时，搬运夹持变弱会切换为立即下放，不再重新全局扫描。
+   - `Phase 6a` 增加主动下放：方块位于盒口上方且 `visual_grip_drop_m > 10 mm` 时，立即更新 carried offset 并进入 `place_drop`。
+   - 新增 `cube_in_box_drop_corridor()`：低位下降时若方块仍在蓝盒 XY 通道内，即使视觉相对夹爪变化较大，也继续执行释放窗口修正，不再回到全局搜索。
+   - 新增 `carry_step_cube_target()` 并修改 Phase 6/6a：从抬升后的第一段搬运开始就采用多段短步进，每步结束后重新补偿方块相对夹爪偏移，解决移动初始位置时长距离搬运导致滑落的问题。
+   - Phase 6a 初次进入短步也使用 `CARRY_STEP_MIN_FRAMES`，不再沿用较慢的 `PLACE_ABOVE_MIN_FRAMES`。
+
+## 10. 自动验证方法
+
+默认位置验证：
+
+```powershell
+$env:SYNRIA_AUTO_START='1'
+$env:SYNRIA_AUTO_EXIT='1'
+.\.venv\Scripts\python.exe -u examples\04_workspace\run.py
 ```
 
-直白说：**先把世界搭出来，再算四个关键点，再按顺序走点，并在抓取时用力传感器“刹车”。**
-
----
-
-## 3. 模型注入层：为什么“运行时改 XML”
-
-关键代码：`examples/common/model_loader.py`
-
-### 3.1 注入算法说明
-
-- `inject_options`：若没有 `<option>`，补上 `integrator="implicitfast" cone="elliptic"`。  
-  - 含义：更稳定的隐式积分器 + 椭圆摩擦锥。
-- `inject_overview_camera`：给世界增加固定俯视相机。  
-- `inject_soft_ball`：插入带 `freejoint` 的球体，设置摩擦/接触参数。  
-- `inject_wrist_camera`：在腕部插入 `wrist_rgb` 相机。  
-- `inject_force_sensor`：在腕部 site 插入 `force/torque` 传感器。  
-- `inject_actuators`：如果没有执行器，则插入 position actuator（每个关节一个）。
-
-### 3.2 设计优点
-
-- **不污染原模型**：原始 `synriard/mjcf/*.xml` 不改，demo 元素全在运行时拼接。  
-- **可重配置**：通过 `include_ball/include_sensors/include_camera` 快速切场景。  
-- **便于实验对比**：只改注入开关即可做 ablation。
-
-### 3.3 局限
-
-- 字符串替换依赖“标记片段存在”（比如某个 geom 文本），对模型版本变化敏感。  
-- 更工程化的做法是 XML DOM 解析或 MJCF API 构造，鲁棒性更高。
-
----
-
-## 4. IK（逆运动学）核心：阻尼最小二乘 DLS
-
-关键代码：`examples/common/ik_solver.py`
-
-### 4.1 求解对象
-
-不是直接对 tool 点做 IK，而是对**两指中点**：
-\[
-\mathbf{p}_c = \frac{\mathbf{p}_L + \mathbf{p}_R}{2}
-\]
-
-这能让抓取动作更“以夹爪中心为目标”，避免单指对齐导致偏抓。
-
-### 4.2 雅可比构造
-
-通过 `mj_jacBody` 求左右指位置雅可比：
-\[
-\mathbf{J}_c = \frac{\mathbf{J}_L + \mathbf{J}_R}{2}
-\]
-
-误差定义：
-\[
-\mathbf{e}_p = \mathbf{p}_{target} - \mathbf{p}_c
-\]
-
-### 4.3 DLS 更新（位置版）
-
-代码对应：
-\[
-\Delta \mathbf{q} = \mathbf{J}^T(\mathbf{J}\mathbf{J}^T + \lambda \mathbf{I})^{-1}\mathbf{e}_p
-\]
-
-- `\lambda` 是阻尼项（代码里 `lam=0.025`），抑制奇异位形附近发散。
-- `delta_q` 再被裁剪到 `[-0.08, 0.08]`，防止步长过大。
-- 最后 `q <- clip(q + step_size * delta_q, lower, upper)` 保证关节限位。
-
-### 4.4 姿态误差（扩展版）
-
-若传入 `target_xmat`，会联合位置+姿态：
-
-姿态小角误差（世界系）近似：
-\[
-\mathbf{e}_R = \frac{1}{2}\sum_{i=1}^{3}(\mathbf{r}_i \times \mathbf{r}_i^*)
-\]
-
-整体最小二乘：
-\[
-\min_{\Delta \mathbf{q}}\left\|\begin{bmatrix}
-\mathbf{J}_p\\
- w_R\mathbf{J}_R
-\end{bmatrix}\Delta \mathbf{q}-
-\begin{bmatrix}
-\mathbf{e}_p\\
- w_R\mathbf{e}_R
-\end{bmatrix}\right\|^2+\lambda\|\Delta\mathbf{q}\|^2
-\]
-
-代码中还支持 `rest_angles` 正则，把解往“舒适姿态”拉。
-
-### 4.5 优缺点
-
-**优点**
-- DLS 计算快、稳定、易实时。  
-- 中点 IK 与夹爪任务高度匹配。  
-- 支持 joint limit / 姿态权重 / rest regularization。
-
-**缺点**
-- 属于局部迭代法，强依赖初值；可能陷入局部可达。  
-- 没显式考虑碰撞约束（只是几何可达，不保证无碰撞）。  
-- 多目标权重（位置 vs 姿态）需要经验调参。
-
----
-
-## 5. 抓取计划：离线关键帧 IK 串联
-
-关键代码：`build_ik_plan`（`ik_solver.py`）
-
-默认目标点：
-- `approach = ball + [0,0,0.15]`
-- `grasp = ball + [0,0,0.6R]`
-- `lift = grasp + [0,0,0.20]`
-- `place = [0.45,0.15,0.20]`
-
-算法思想是“**分段点到点**”：每算出一个点，就把该解作为下一点 seed。  
-这本质是 warm-start continuation，可显著提高后续收敛率。
-
-缺点是仍然是“几何点串联”，没有全局时间最优或碰撞最优（不是 TrajOpt/CHOMP）。
-
----
-
-## 6. 轨迹生成：余弦插值（ease-in/ease-out）
-
-关键代码：`examples/common/motion.py::move_arm_to_angles`
-
-插值核：
-\[
-s(t)=\frac{1-\cos(\pi t)}{2},\quad t\in[0,1]
-\]
-\[
-\mathbf{q}(t)=\mathbf{q}_0+s(t)(\mathbf{q}_1-\mathbf{q}_0)
-\]
-
-直观解释：开始慢、中间快、结束慢，减少突变。  
-对位置伺服器来说，这比线性插值更不容易激发振荡。
-
-### 优点
-- 简单稳定，工程上常用。
-- 速度边界平滑（端点速度接近 0）。
-
-### 不足
-- 不是动力学最优（未显式最小 jerk/torque）。
-- 若路径穿越障碍，插值本身不会避障。
-
----
-
-## 7. 夹爪闭合与接触判定：阈值停止策略
-
-关键代码：`close_gripper`（`motion.py`）
-
-流程：
-1. 夹爪目标从 open→closed 线性推进。  
-2. 每步读取 `actuator_force` 的绝对值最大值。  
-3. 超过阈值 `force_threshold` 即停止并判定“抓到/触碰到”。
-
-这是典型的**力控近似策略**（位置控制+力阈值守护），比“直接一下夹死”更稳。
-
-### 优点
-- 实现成本低，不需要完整阻抗控制框架。  
-- 对未知软硬物体都能给出“接触即停”的保护。
-
-### 缺点
-- 只用单阈值，无法精细区分“稳抓”与“轻碰”。  
-- 阈值对模型质量/摩擦/时间步敏感，需要调参。
-
----
-
-## 8. 力/触觉传感器：指数低通滤波
-
-关键代码：`examples/common/force_sensor.py`
-
-滤波更新：
-\[
-\mathbf{y}_k = \mathbf{y}_{k-1} + \alpha(\mathbf{x}_k-\mathbf{y}_{k-1})
-\]
-
-- `x_k` 原始传感器值
-- `y_k` 滤波后值
-- `\alpha\in[0,1]`
-
-直观：`\alpha` 越小越平滑但延迟更大；越大越灵敏但更抖。
-
-### 为什么需要滤波
-MuJoCo 接触解算的瞬时力会有高频抖动（contact chatter），直接显示会“跳字”。低通后更接近真实采样传感器观感。
-
-### 触觉力提取
-如果触觉传感器是向量，取范数：
-\[
-F = \|\mathbf{f}\|_2
-\]
-
-并定义左右平衡指标：
-\[
-\text{balance}=\frac{|F_L-F_R|}{F_L+F_R+\epsilon}
-\]
-
-可用于判断是否“偏夹”。
-
----
-
-## 9. 相机管线：RGB 与 RGB-D 对齐渲染
-
-关键代码：`examples/common/camera.py`
-
-`RGBDCameraWindow.render_rgbd` 的做法是：
-1. 同一相机位姿渲染 RGB；
-2. 切换 renderer 深度模式再渲染 depth；
-3. 深度图做百分位归一化 + colormap。
-
-深度归一化核心：
-\[
-D_{norm}=\text{clip}\left(\frac{D-D_{near}}{D_{far}-D_{near}},0,1\right)
-\]
-其中 `near/far` 取有效深度的 3%/97% 分位，避免极端值把对比度拉坏。
-
----
-
-## 10. PyBullet 版本与 MuJoCo 版本的算法对照
-
-- `examples/complete_grasping_demo.py`（PyBullet）也用 IK + 平滑插值 + 力反馈停夹，但 IK 求解器由 `p.calculateInverseKinematics` 提供。  
-- `examples/complete_grasping_demo_mujoco.py` 将同类逻辑内联在单文件中，便于“一个脚本跑通”。
-
-### 差异理解
-- MuJoCo 版更强调“自行可控”的数值细节（自己写 DLS IK）。
-- PyBullet 版更偏“调 API 快速验证”。
-
----
-
-## 11. 关键参数敏感性（调参指南）
-
-1. **IK 阻尼 `lam`**：大→更稳但更慢；小→更快但易抖/奇异。  
-2. **`step_size` 与 `delta_q` clip**：大步长可能快但易越界；clip 太小会收敛慢。  
-3. **`force_threshold`**：过低会“误停”，过高会“挤压过头”。  
-4. **滤波 `alpha`**：展示/监测建议 0.2~0.4；控制闭环若用滤波力，要注意延迟。  
-5. **SLEEP_SCALE**：只影响墙钟速度与观感，不改仿真物理步长（前提是仍每步 `mj_step`）。
-
----
-
-## 12. 可改进点（工程升级路线）
-
-- 从点到点升级到**时间参数化轨迹**（如 minimum-jerk / TOPP）。
-- 把 grasp 判定从单阈值升级为“力+触觉平衡+相对运动”联合判据。
-- 在 IK 中加入碰撞约束（优化器 + signed distance）。
-- XML 注入改为结构化 MJCF 构造，减少字符串脆弱性。
-
----
-
-## 13. 一句话总结
-
-这套 examples 的核心算法组合是：  
-**DLS 逆运动学 + 余弦平滑轨迹 + 力阈值闭合 + 低通滤波感知 + 运行时场景注入**。  
-它不是最“学术最优”的全局规划器，但在工程上具有**可解释、易调试、实时友好**的优点，非常适合演示与教学。
+移动正方体初始位置验证：
+
+```powershell
+$env:SYNRIA_AUTO_START='1'
+$env:SYNRIA_AUTO_EXIT='1'
+$env:SYNRIA_CUBE_X='0.26'
+$env:SYNRIA_CUBE_Y='0.08'
+$env:SYNRIA_CUBE_Z='0.023'
+.\.venv\Scripts\python.exe -u examples\04_workspace\run.py
+```
+
+成功判据：
+
+- 日志出现 `Grasp SUCCESS`。
+- 日志出现 `Cube placed in box`。
+- 最终进入 `Demo complete`。
+- 方块释放前 `cube_release_window()` 满足盒内 XY、低位 Z 和盒底支撑要求。
+
+## 11. 本轮验证矩阵
+
+| 编号 | 初始正方体位置 | 期望 | 当前结果 |
+| --- | --- | --- | --- |
+| A | 默认 `[0.300, 0.000, 0.023]` | 一次定位、面接触抓取、柔顺放入盒内 | 待验证 |
+| B | 移动位置 1 `[0.260, 0.080, 0.023]` | 同上 | 待验证 |
+| C | 移动位置 2 `[0.340, 0.100, 0.023]` | 同上 | 待验证 |
+| D | 移动位置 3 `[0.280, -0.120, 0.023]` | 同上 | 待验证 |
+
+后续每次修改 `run.py` 或传感器/相机相关参数，都必须同步更新本文档。
